@@ -152,11 +152,11 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tid = int(action.split("_",1)[1])
         with db() as c:
             t = c.execute("SELECT * FROM tasks WHERE id=? AND active=1", (tid,)).fetchone()
-            claim = c.execute("SELECT status FROM task_claims WHERE task_id=? AND user_id=?", (tid,uid)).fetchone()
+            claim = c.execute("SELECT status,invite_link FROM task_claims WHERE task_id=? AND user_id=?", (tid,uid)).fetchone()
         if not t:
             await q.edit_message_text("This task is no longer available.", reply_markup=kb([[("⬅️ Jobs","jobs")]])); return
         status = claim["status"] if claim else "not started"
-        invite = ""
+        invite = claim["invite_link"] if claim else ""
         if not claim and t["completed_count"] < t["target"]:
             try:
                 link_obj = await context.bot.create_chat_invite_link(
@@ -401,31 +401,53 @@ async def notify_admins(context, message):
 
 async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     cmu = update.chat_member
-    if not cmu or not cmu.invite_link: return
-    if cmu.new_chat_member.status not in ("member","administrator","creator"): return
-    if cmu.old_chat_member.status in ("member","administrator","creator","restricted"): return
+    if not cmu or not cmu.invite_link:
+        return
+    if cmu.new_chat_member.status not in ("member", "administrator", "creator"):
+        return
+    if cmu.old_chat_member.status in ("member", "administrator", "creator", "restricted"):
+        return
     link = cmu.invite_link.invite_link
     with db() as c:
-        mapping = c.execute("SELECT task_id,owner_user_id FROM invite_links WHERE invite_link=?", (link,)).fetchone()
-        if not mapping: return
+        mapping = c.execute(
+            "SELECT task_id,owner_user_id FROM invite_links WHERE invite_link=?", (link,)
+        ).fetchone()
+        if not mapping:
+            return
         joined_id = cmu.new_chat_member.user.id
-        if joined_id == mapping["owner_user_id"]: return
+        if joined_id == mapping["owner_user_id"]:
+            return
         try:
-            c.execute("INSERT INTO invite_events(invite_link,joined_user_id,joined_at) VALUES(?,?,?)",(link,joined_id,now()))
+            c.execute(
+                "INSERT INTO invite_events(invite_link,joined_user_id,joined_at) VALUES(?,?,?)",
+                (link, joined_id, now())
+            )
         except sqlite3.IntegrityError:
             return
-        task = c.execute("SELECT * FROM tasks WHERE id=? AND active=1", (mapping["task_id"],)).fetchone()
-        if not task or task["completed_count"] >= task["target"]: return
+        task = c.execute(
+            "SELECT * FROM tasks WHERE id=? AND active=1", (mapping["task_id"],)
+        ).fetchone()
+        if not task or task["completed_count"] >= task["target"]:
+            return
+        # The admin-configured points value is the reward for each unique verified join.
         c.execute("UPDATE tasks SET completed_count=completed_count+1 WHERE id=?", (task["id"],))
+        c.execute("UPDATE users SET points=points+? WHERE user_id=?",
+                  (task["points"], mapping["owner_user_id"]))
         new_count = task["completed_count"] + 1
-        if new_count >= task["target"]:
+        c.execute("UPDATE task_claims SET status='in progress' WHERE task_id=? AND user_id=?",
+                  (task["id"], mapping["owner_user_id"]))
+        completed = new_count >= task["target"]
+        if completed:
             c.execute("UPDATE tasks SET active=0 WHERE id=?", (task["id"],))
-            c.execute("UPDATE users SET points=points+? WHERE user_id=?", (task["points"],mapping["owner_user_id"]))
-            c.execute("UPDATE task_claims SET status='completed' WHERE task_id=? AND user_id=?", (task["id"],mapping["owner_user_id"]))
-            context.application.create_task(context.bot.send_message(mapping["owner_user_id"],f"🎉 Task completed! You earned {task['points']} points."))
-        else:
-            c.execute("UPDATE task_claims SET status='in progress' WHERE task_id=? AND user_id=?", (task["id"],mapping["owner_user_id"]))
-            context.application.create_task(context.bot.send_message(mapping["owner_user_id"],f"🔗 Task progress: {new_count}/{task['target']} verified joins."))
+            c.execute("UPDATE task_claims SET status='completed' WHERE task_id=?", (task["id"],))
+    message = "🎉 Verified join recorded! You earned " + str(task["points"]) + " points.\n"
+    message += "Campaign progress: " + str(new_count) + "/" + str(task["target"]) + "."
+    if completed:
+        message += "\nThe campaign target has been reached and the task is now closed."
+    try:
+        await context.bot.send_message(mapping["owner_user_id"], message)
+    except Exception:
+        log.warning("Could not notify task owner %s", mapping["owner_user_id"])
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
