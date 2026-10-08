@@ -160,7 +160,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not claim and t["completed_count"] < t["target"]:
             try:
                 link_obj = await context.bot.create_chat_invite_link(
-                    chat_id=t["channel"], member_limit=1,
+                    chat_id=t["channel"],
                     name=f"kefia-task-{tid}-user-{uid}"
                 )
                 invite = link_obj.invite_link
