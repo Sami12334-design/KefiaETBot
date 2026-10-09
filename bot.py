@@ -158,6 +158,11 @@ def init_db():
         ):
             if column not in market_columns:
                 c.execute(f"ALTER TABLE market_listings ADD COLUMN {column} {declaration}")
+        # Existing task databases gain an optional cap on how many users may claim each task.
+        task_columns = {row["name"] for row in c.execute("PRAGMA table_info(tasks)").fetchall()}
+        if "participant_limit" not in task_columns:
+            c.execute("ALTER TABLE tasks ADD COLUMN participant_limit INTEGER NOT NULL DEFAULT 0")
+
         # Editable database defaults: admins can replace these values without code changes.
         c.execute("""INSERT OR IGNORE INTO digital_products
           (id,name,duration_months,price,stock,description,features,important_note,notice,warranty,active,updated_at)
@@ -238,7 +243,7 @@ def upsert_user(user):
 
 def home_keyboard(admin=False):
     rows = [
-        [("🧩 Daily Jobs", "jobs"), ("🔗 Invite & Earn", "invite")],
+        [("🧩 Daily Tasks", "jobs"), ("🔗 Invite & Earn", "invite")],
         [("📣 Promote / Ads", "ads"), ("🛍 Marketplace", "market")],
         [("👛 My Wallet", "wallet"), ("💸 Withdraw Points", "withdraw")],
         [("👤 My Account", "profile")]
@@ -1519,24 +1524,40 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             tasks = c.execute("SELECT * FROM tasks WHERE active=1 AND completed_count<target ORDER BY id DESC").fetchall()
             claims = {r["task_id"]: r["status"] for r in c.execute("SELECT task_id,status FROM task_claims WHERE user_id=?", (uid,)).fetchall()}
-        if not tasks:
-            await q.edit_message_text("🧩 No jobs are available right now. Please check back later.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
+            claim_counts = {r["task_id"]: r["n"] for r in c.execute("SELECT task_id,COUNT(*) n FROM task_claims GROUP BY task_id").fetchall()}
         rows = []
-        for t in tasks[:20]:
+        for t in tasks:
+            already_claimed = t["id"] in claims
+            participant_limit = int(t["participant_limit"] or 0)
+            claimed_users = int(claim_counts.get(t["id"], 0))
+            if not already_claimed and participant_limit > 0 and claimed_users >= participant_limit:
+                continue
             status = claims.get(t["id"])
-            label = f"{'⏳ ' if status else '✅ '}{t['title']} · {t['points']} pts · {t['completed_count']}/{t['target']}"
+            spots = "∞" if participant_limit == 0 else str(max(0, participant_limit - claimed_users))
+            label = f"{'🟢' if status else '✨'} {t['title']} · {t['points']} pts · {t['completed_count']}/{t['target']} · {spots} spots"
             rows.append([(label[:60], f"task_{t['id']}")])
+            if len(rows) >= 20:
+                break
+        if not rows:
+            await q.edit_message_text("🧩 No tasks are open right now. Check back soon for new opportunities.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
         rows.append([("⬅️ Dashboard", "home")])
-        await q.edit_message_text("🧩 Available Jobs\nChoose a job to view its rules and progress:", reply_markup=kb(rows))
+        await q.edit_message_text("🧩 DAILY TASKS\n\nChoose a task to see its reward, progress and your personal invite link.", reply_markup=kb(rows))
     elif action.startswith("task_"):
-        tid = int(action.split("_",1)[1])
+        try:
+            tid = int(action.split("_",1)[1])
+        except (TypeError, ValueError):
+            await q.edit_message_text("That task button is invalid.", reply_markup=kb([[("⬅️ Daily Tasks","jobs")]])); return
         with db() as c:
             t = c.execute("SELECT * FROM tasks WHERE id=? AND active=1", (tid,)).fetchone()
             claim = c.execute("SELECT status,invite_link FROM task_claims WHERE task_id=? AND user_id=?", (tid,uid)).fetchone()
+            claimed_users = c.execute("SELECT COUNT(*) n FROM task_claims WHERE task_id=?", (tid,)).fetchone()["n"]
         if not t:
-            await q.edit_message_text("This task is no longer available.", reply_markup=kb([[("⬅️ Jobs","jobs")]])); return
-        status = claim["status"] if claim else "not started"
+            await q.edit_message_text("This task is no longer available.", reply_markup=kb([[("⬅️ Daily Tasks","jobs")]])); return
+        status = claim["status"] if claim else "Ready to claim"
         invite = claim["invite_link"] if claim else ""
+        participant_limit = int(t["participant_limit"] or 0)
+        if not claim and participant_limit > 0 and claimed_users >= participant_limit:
+            await q.edit_message_text("👥 This task has reached its participant limit. Please choose another task.", reply_markup=kb([[("⬅️ Daily Tasks","jobs")]])); return
         if not claim and t["completed_count"] < t["target"]:
             try:
                 link_obj = await context.bot.create_chat_invite_link(
@@ -1549,19 +1570,32 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                               (tid,uid,invite,now()))
                     c.execute("INSERT OR IGNORE INTO invite_links(invite_link,task_id,owner_user_id,created_at) VALUES(?,?,?,?)",
                               (invite,tid,uid,now()))
+                    claim = c.execute("SELECT status,invite_link FROM task_claims WHERE task_id=? AND user_id=?", (tid,uid)).fetchone()
+                status = claim["status"] if claim else "pending"
+                invite = claim["invite_link"] if claim else invite
             except Exception:
                 log.exception("Could not create invite link for task %s", tid)
                 await q.edit_message_text(
-                    "⚠️ This task is temporarily unavailable. The bot needs admin permission to create invitation links in the target channel.",
-                    reply_markup=kb([[("⬅️ Jobs","jobs")]])
+                    "⚠️ We couldn't assign this task right now. The bot needs permission to create invite links in the target channel. Please try again later.",
+                    reply_markup=kb([[("⬅️ Daily Tasks","jobs")]])
                 ); return
-        msg = (f"🧩 {t['title']}\nChannel: {t['channel']}\nReward: {t['points']} points\n"
-               f"Target: {t['target']} verified joins\nProgress: {t['completed_count']}/{t['target']}\n"
-               f"Your status: {status}")
-        if invite:
-            msg += f"\n\nYour unique invitation link (share it with real users):\n{invite}"
-        msg += "\n\nOnly new, unique joins tracked by Telegram count. No self-referrals or fake accounts."
-        await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh Progress",f"task_{tid}")],[("⬅️ Jobs","jobs")]]))
+        with db() as c:
+            current = c.execute("SELECT COUNT(*) n FROM task_claims WHERE task_id=?", (tid,)).fetchone()["n"]
+        slots = "Unlimited" if participant_limit == 0 else f"{current}/{participant_limit} users assigned"
+        msg = (
+            f"🧩 DAILY TASK · {t['title']}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"🎁 Reward: {t['points']} points per verified join\n"
+            f"📣 Channel: {t['channel']}\n"
+            f"📈 Campaign progress: {t['completed_count']}/{t['target']} joins\n"
+            f"👥 Task participants: {slots}\n"
+            f"🧭 Your status: {status}\n\n"
+            f"🔗 YOUR PERSONAL INVITE LINK\n{invite if invite else 'Not assigned'}\n\n"
+            "Share this link with real people. Your link is created automatically for you. "
+            "Only new, unique joins verified by Telegram count toward your reward. "
+            "Self-joins, duplicate accounts and fake members do not count."
+        )
+        await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress",f"task_{tid}")],[("🧩 More tasks","jobs"),("🏠 Dashboard","home")]]))
     elif action == "invite":
         bot = await context.bot.get_me()
         link = f"https://t.me/{bot.username}?start=ref_{uid}"
@@ -1825,11 +1859,163 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = c.execute("SELECT id,action,asset_type,status,price FROM market_listings WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,)).fetchall()
         msg = "📋 YOUR LISTINGS\n\n" + ("\n".join(f"#{r['id']} · {r['asset_type']} · {r['status']} · {r['price'] if r['price'] is not None else 'price pending'} ETB" for r in rows) if rows else "You haven't submitted any listings yet.")
         await q.edit_message_text(msg, reply_markup=kb([[("📤 Sell an account","sell_social")],[("⬅️ Marketplace","market")]]))
+    elif action == "admin_tasks":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            tasks = c.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 25").fetchall()
+            claim_counts = {r["task_id"]: r["n"] for r in c.execute("SELECT task_id,COUNT(*) n FROM task_claims GROUP BY task_id").fetchall()}
+        rows = []
+        for task in tasks:
+            assigned = int(claim_counts.get(task["id"], 0))
+            cap = "∞" if not int(task["participant_limit"] or 0) else str(task["participant_limit"])
+            state = "🟢" if task["active"] and task["completed_count"] < task["target"] else "⏸"
+            rows.append([(f"{state} #{task['id']} {task['title']} · {assigned}/{cap}", f"admintask_view_{task['id']}")])
+        rows += [[("🏆 Overall leaderboard","admin_task_leaderboard")],[("⬅️ Admin Dashboard","admin")]]
+        await q.edit_message_text("📋 TASK MANAGER\nOpen a task to review its progress, edit settings, pause it or remove it.", reply_markup=kb(rows))
+    elif action == "admin_task_leaderboard":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            rows = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,COUNT(e.id) joins_count,"
+                "COALESCE(SUM(t.points),0) earned "
+                "FROM invite_events e JOIN invite_links l ON l.invite_link=e.invite_link "
+                "JOIN tasks t ON t.id=l.task_id JOIN users u ON u.user_id=l.owner_user_id "
+                "GROUP BY u.user_id ORDER BY joins_count DESC,earned DESC LIMIT 15"
+            ).fetchall()
+        if rows:
+            lines = ["🏆 TASK LEADERBOARD", "Verified task joins · Top 15", ""]
+            for i, row in enumerate(rows, 1):
+                label = ("@" + row["username"]) if row["username"] else (row["first_name"] or str(row["user_id"]))
+                lines.append(f"{i}. {label[:30]} — {row['joins_count']} joins · {row['earned']} points")
+            body = "\n".join(lines)
+        else:
+            body = "🏆 TASK LEADERBOARD\n\nNo verified task joins have been recorded yet."
+        await q.edit_message_text(body, reply_markup=kb([[("📋 Manage tasks","admin_tasks")],[("⬅️ Admin Dashboard","admin")]]))
+    elif action.startswith("admintask_view_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            tid = int(action.rsplit("_",1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            task = c.execute("SELECT * FROM tasks WHERE id=?", (tid,)).fetchone()
+            assigned = c.execute("SELECT COUNT(*) n FROM task_claims WHERE task_id=?", (tid,)).fetchone()["n"]
+            joins = c.execute("SELECT COUNT(*) n FROM invite_events e JOIN invite_links l ON l.invite_link=e.invite_link WHERE l.task_id=?", (tid,)).fetchone()["n"]
+            participants = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,tc.status,COUNT(e.id) joins_count "
+                "FROM task_claims tc JOIN users u ON u.user_id=tc.user_id "
+                "LEFT JOIN invite_links l ON l.task_id=tc.task_id AND l.owner_user_id=tc.user_id "
+                "LEFT JOIN invite_events e ON e.invite_link=l.invite_link "
+                "WHERE tc.task_id=? GROUP BY u.user_id ORDER BY joins_count DESC LIMIT 10", (tid,)
+            ).fetchall()
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
+        cap = "Unlimited" if not int(task["participant_limit"] or 0) else str(task["participant_limit"])
+        state = "Active" if task["active"] else "Paused/closed"
+        body = (f"📋 TASK #{tid} · {task['title']}\n\nStatus: {state}\nChannel: {task['channel']}\n"
+                f"Reward per verified join: {task['points']} points\nCampaign: {task['completed_count']}/{task['target']} verified joins\n"
+                f"Assigned users: {assigned}/{cap}\nTotal verified joins: {joins}\n\n👥 TOP PARTICIPANTS")
+        if participants:
+            for i, p in enumerate(participants, 1):
+                who = ("@" + p["username"]) if p["username"] else (p["first_name"] or str(p["user_id"]))
+                body += f"\n{i}. {who[:25]} — {p['joins_count']} joins · {p['status']}"
+        else:
+            body += "\nNo users have claimed this task yet."
+        rows = [
+            [("✏️ Edit title","admintask_edit_title_" + str(tid)),("🎯 Edit target","admintask_edit_target_" + str(tid))],
+            [("💰 Edit reward","admintask_edit_points_" + str(tid)),("👥 Edit user limit","admintask_edit_limit_" + str(tid))],
+            [("🏆 Task leaderboard","admintask_leaderboard_" + str(tid))],
+            [("⏸ Pause / Resume","admintask_toggle_" + str(tid)),("🗑 Remove","admintask_delete_confirm_" + str(tid))],
+            [("⬅️ All tasks","admin_tasks")]
+        ]
+        await q.edit_message_text(body, reply_markup=kb(rows))
+    elif action.startswith("admintask_edit_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            prefix, tid_text = action.rsplit("_",1)
+            tid = int(tid_text)
+            field = prefix[len("admintask_edit_"):]
+        except (ValueError, IndexError):
+            await q.edit_message_text("Invalid task edit request."); return
+        field_labels = {"title":"task title","target":"verified-join target","points":"points per verified join","limit":"maximum number of users"}
+        if field not in field_labels:
+            await q.edit_message_text("Unknown task setting."); return
+        set_pending(uid, "admin_task_edit", {"task_id":tid,"field":field})
+        await q.edit_message_text(f"Send the new {field_labels[field]}. For user limit, send 0 for unlimited.", reply_markup=kb([[("Cancel","admintask_view_" + str(tid))]]))
+    elif action.startswith("admintask_toggle_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: tid = int(action.rsplit("_",1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            task = c.execute("SELECT active,completed_count,target FROM tasks WHERE id=?", (tid,)).fetchone()
+            if task:
+                new_active = 0 if task["active"] else (1 if task["completed_count"] < task["target"] else 0)
+                c.execute("UPDATE tasks SET active=? WHERE id=?", (new_active,tid))
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
+        await q.edit_message_text("✅ Task updated.", reply_markup=kb([[("📋 Review task","admintask_view_" + str(tid))],[("📋 Manage tasks","admin_tasks")]]))
+    elif action.startswith("admintask_delete_confirm_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: tid = int(action.rsplit("_",1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            task = c.execute("SELECT title FROM tasks WHERE id=?", (tid,)).fetchone()
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
+        await q.edit_message_text(f"Remove task #{tid} · {task['title']}? Its task links and join records will be removed. Previously awarded points will remain in user wallets.", reply_markup=kb([[("🗑 Yes, remove","admintask_delete_" + str(tid)),("Cancel","admintask_view_" + str(tid))]]))
+    elif action.startswith("admintask_delete_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: tid = int(action.rsplit("_",1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            links = [r["invite_link"] for r in c.execute("SELECT invite_link FROM invite_links WHERE task_id=?", (tid,)).fetchall()]
+            for link in links:
+                c.execute("DELETE FROM invite_events WHERE invite_link=?", (link,))
+            c.execute("DELETE FROM invite_links WHERE task_id=?", (tid,))
+            c.execute("DELETE FROM task_claims WHERE task_id=?", (tid,))
+            cur = c.execute("DELETE FROM tasks WHERE id=?", (tid,))
+        await q.edit_message_text("🗑 Task removed. Previously awarded points remain unchanged.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")],[("⬅️ Admin Dashboard","admin")]]))
+    elif action.startswith("admintask_leaderboard_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: tid = int(action.rsplit("_",1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            task = c.execute("SELECT title,points FROM tasks WHERE id=?", (tid,)).fetchone()
+            rows = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,COUNT(e.id) joins_count "
+                "FROM task_claims tc JOIN users u ON u.user_id=tc.user_id "
+                "LEFT JOIN invite_links l ON l.task_id=tc.task_id AND l.owner_user_id=tc.user_id "
+                "LEFT JOIN invite_events e ON e.invite_link=l.invite_link "
+                "WHERE tc.task_id=? GROUP BY u.user_id ORDER BY joins_count DESC LIMIT 20", (tid,)
+            ).fetchall()
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
+        body = f"🏆 LEADERBOARD · {task['title']}\nVerified joins by participant:\n\n"
+        if rows:
+            for i, row in enumerate(rows, 1):
+                who = ("@" + row["username"]) if row["username"] else (row["first_name"] or str(row["user_id"]))
+                body += f"{i}. {who[:25]} — {row['joins_count']} joins · {row['joins_count'] * int(task['points'])} pts\n"
+        else:
+            body += "No participants yet."
+        await q.edit_message_text(body, reply_markup=kb([[("⬅️ Review task","admintask_view_" + str(tid))],[("📋 Manage tasks","admin_tasks")]]))
     elif action == "admin":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
         await q.edit_message_text("🛡 Admin Dashboard\nManage tasks, review payouts and listings, configure prices, and inspect platform statistics.", reply_markup=kb([
-            [("➕ Create join task","admin_new_task"),("📊 Statistics","admin_stats")],
+            [("➕ Create join task","admin_new_task"),("📋 Manage tasks","admin_tasks")],
+            [("📊 Statistics","admin_stats"),("🏆 Task leaderboard","admin_task_leaderboard")],
             [("🛍 Social account listings","admin_marketplace")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
@@ -1841,17 +2027,19 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(uid): return
         with db() as c:
             c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'admin_task_title','') ON CONFLICT(user_id) DO UPDATE SET action='admin_task_title',data=''", (uid,))
-        await q.edit_message_text("Send task title, target channel username/ID, target number of verified joins, and points reward separated by |\nExample: Join Channel | @ExampleChannel | 50 | 20\nThe bot must be an administrator in the channel with invite-link permissions.", reply_markup=kb([[("Cancel","admin")]]))
+        await q.edit_message_text("Create a task using this format (separate each value with |):\nTask title | @channel or channel ID | verified-join target | points per join | max users\nExample: Join Channel | @ExampleChannel | 50 | 20 | 100\nSet max users to 0 for unlimited. The bot must be an administrator in the channel with invite-link permissions.", reply_markup=kb([[("Cancel","admin")]]))
     elif action == "admin_stats":
         if not is_admin(uid): return
         with db() as c:
             users = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
             tasks = c.execute("SELECT COUNT(*) n FROM tasks").fetchone()["n"]
+            assigned = c.execute("SELECT COUNT(*) n FROM task_claims").fetchone()["n"]
+            active_tasks = c.execute("SELECT COUNT(*) n FROM tasks WHERE active=1 AND completed_count<target").fetchone()["n"]
             ads = c.execute("SELECT COUNT(*) n FROM ad_requests WHERE status='pending'").fetchone()["n"]
             wd = c.execute("SELECT COUNT(*) n FROM withdrawals WHERE status='pending'").fetchone()["n"]
             listings = c.execute("SELECT COUNT(*) n FROM market_listings WHERE status='pending'").fetchone()["n"]
             joins = c.execute("SELECT COUNT(*) n FROM invite_events").fetchone()["n"]
-        await q.edit_message_text(f"📊 Platform Statistics\nUsers: {users}\nTasks: {tasks}\nTracked unique joins: {joins}\nPending ad requests: {ads}\nPending withdrawals: {wd}\nPending marketplace listings: {listings}", reply_markup=kb([[("⬅️ Admin Dashboard","admin")]]))
+        await q.edit_message_text(f"📊 PLATFORM STATISTICS\nUsers: {users}\nTasks total: {tasks}\nTasks open: {active_tasks}\nUsers assigned to tasks: {assigned}\nVerified task joins: {joins}\nPending ad requests: {ads}\nPending withdrawals: {wd}\nPending marketplace listings: {listings}", reply_markup=kb([[("🏆 Task leaderboard","admin_task_leaderboard")],[("📋 Manage tasks","admin_tasks")],[("⬅️ Admin Dashboard","admin")]]))
     elif action == "admin_settings":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only.")
@@ -3246,16 +3434,58 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     if await handle_crypto_text(update, context, action, data, value):
         return
+    if action == "admin_task_edit":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        try:
+            tid = int(state.get("task_id", 0))
+            field = str(state.get("field", ""))
+        except (TypeError, ValueError):
+            tid, field = 0, ""
+        allowed = {"title", "target", "points", "limit"}
+        if tid < 1 or field not in allowed:
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("That task edit expired. Open Manage Tasks and try again."); return
+        if field == "title":
+            if not value or len(value) > 120:
+                await message.reply_text("Enter a task title between 1 and 120 characters."); return
+            with db() as c:
+                cur = c.execute("UPDATE tasks SET title=? WHERE id=?", (value,tid))
+        else:
+            try:
+                number = int(value)
+                if number < 0 or (field in {"target","points"} and number < 1):
+                    raise ValueError()
+            except ValueError:
+                await message.reply_text("Enter a valid whole number. Target and points must be at least 1; user limit may be 0 for unlimited."); return
+            column = {"target":"target","points":"points","limit":"participant_limit"}[field]
+            with db() as c:
+                task = c.execute("SELECT completed_count FROM tasks WHERE id=?", (tid,)).fetchone()
+                if not task:
+                    c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                    await message.reply_text("Task not found."); return
+                if field == "target" and number < int(task["completed_count"]):
+                    await message.reply_text("Target cannot be lower than the number of verified joins already recorded."); return
+                c.execute(f"UPDATE tasks SET {column}=? WHERE id=?", (number,tid))
+                if field == "target":
+                    c.execute("UPDATE tasks SET active=? WHERE id=?", (1 if number > int(task["completed_count"]) else 0,tid))
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text("✅ Task settings updated.", reply_markup=kb([[("📋 Review task",f"admintask_view_{tid}")],[("📋 Manage tasks","admin_tasks")]]))
+        return
     if action == "admin_task_title":
         if not is_admin(user.id): return
         parts = [x.strip() for x in value.split("|")]
-        if len(parts) != 4 or not parts[0] or not parts[1]:
-            await update.effective_message.reply_text("Format: Task title | @channel | target joins | points"); return
+        if len(parts) not in (4, 5) or not parts[0] or not parts[1]:
+            await update.effective_message.reply_text("Format: Task title | @channel | target joins | points | max users (optional; 0 = unlimited)"); return
         try:
             target, points = int(parts[2]), int(parts[3])
-            if target < 1 or points < 1: raise ValueError()
+            participant_limit = int(parts[4]) if len(parts) == 5 else 0
+            if target < 1 or points < 1 or participant_limit < 0: raise ValueError()
         except ValueError:
-            await update.effective_message.reply_text("Target and points must be positive whole numbers."); return
+            await update.effective_message.reply_text("Target and points must be positive whole numbers; max users must be 0 or greater."); return
         try:
             chat = await context.bot.get_chat(parts[1])
             bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
@@ -3266,10 +3496,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             await update.effective_message.reply_text("Cannot access/create invite links for that channel. Check the channel ID and bot admin permissions."); return
         with db() as c:
-            c.execute("INSERT INTO tasks(title,channel,target,points,created_by,created_at) VALUES(?,?,?,?,?,?)",
-                      (parts[0],str(chat.id),target,points,user.id,now()))
+            c.execute("INSERT INTO tasks(title,channel,target,points,participant_limit,created_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                      (parts[0],str(chat.id),target,points,participant_limit,user.id,now()))
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await update.effective_message.reply_text("✅ Task created. Users can now claim it from Daily Jobs.", reply_markup=home_keyboard(True))
+        await update.effective_message.reply_text("✅ Task created. It now appears in Daily Tasks.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")],[("🛡 Admin Dashboard","admin")]]))
     elif action == "withdraw":
         with db() as c:
             u = c.execute("SELECT points FROM users WHERE user_id=?", (user.id,)).fetchone()
