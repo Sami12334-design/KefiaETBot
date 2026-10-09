@@ -113,13 +113,28 @@ def home_keyboard(admin=False):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     upsert_user(user)
-    # Optional referral format: /start ref_123 (only records a valid, non-self referral).
+    # A referral is counted once per Telegram account. Reward is optional and admin-configured.
     arg = context.args[0] if context.args else ""
     if arg.startswith("ref_") and arg[4:].isdigit():
         ref = int(arg[4:])
         if ref != user.id:
+            rewarded_points = 0
             with db() as c:
-                c.execute("UPDATE users SET referred_by=? WHERE user_id=? AND referred_by IS NULL", (ref, user.id))
+                inviter = c.execute("SELECT user_id FROM users WHERE user_id=?", (ref,)).fetchone()
+                if inviter:
+                    cur = c.execute("UPDATE users SET referred_by=? WHERE user_id=? AND referred_by IS NULL", (ref, user.id))
+                    if cur.rowcount == 1:
+                        reward = c.execute("SELECT value FROM settings WHERE key='referral_points'").fetchone()
+                        if reward:
+                            try: rewarded_points = max(0, int(reward["value"]))
+                            except (TypeError, ValueError): rewarded_points = 0
+                        if rewarded_points:
+                            c.execute("UPDATE users SET points=points+? WHERE user_id=?", (rewarded_points, ref))
+            if rewarded_points:
+                try:
+                    await context.bot.send_message(ref, f"🎉 A new user joined through your invite link! You earned {rewarded_points} points.")
+                except Exception:
+                    log.warning("Could not notify referrer %s", ref)
     await update.effective_message.reply_text(
         f"Welcome {user.first_name or 'there'} to KefiaETBot!\n\n"
         "Complete verified jobs, earn points, promote products, and submit marketplace requests. "
