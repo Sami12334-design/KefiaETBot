@@ -1651,6 +1651,21 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "withdraw":
         with db() as c:
             u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
+            # One-time recovery for task rewards that were announced but not credited
+            # because the wallet row did not exist when Telegram confirmed the join.
+            # Never auto-recover if this user has any withdrawal history.
+            if u and int(u["points"] or 0) == 0:
+                prior_withdrawal = c.execute("SELECT 1 FROM withdrawals WHERE user_id=? LIMIT 1", (uid,)).fetchone()
+                if not prior_withdrawal:
+                    earned = c.execute(
+                        "SELECT COALESCE(SUM(t.points),0) AS total FROM invite_events e "
+                        "JOIN invite_links l ON l.invite_link=e.invite_link "
+                        "JOIN tasks t ON t.id=l.task_id WHERE l.owner_user_id=?",
+                        (uid,)
+                    ).fetchone()["total"]
+                    if int(earned or 0) > 0:
+                        c.execute("UPDATE users SET points=points+? WHERE user_id=?", (int(earned), uid))
+                        u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
             minimum = c.execute("SELECT value FROM settings WHERE key='min_withdraw_points'").fetchone()
             promoter = c.execute("SELECT * FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
         minimum_points = int(minimum["value"]) if minimum else 1000
