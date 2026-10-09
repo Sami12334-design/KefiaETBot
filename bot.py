@@ -187,12 +187,11 @@ def migrate_legacy_sqlite(c):
         log.info("Legacy SQLite migration already marked complete.")
         return
     if not os.path.isfile(DB_PATH) or os.path.getsize(DB_PATH) == 0:
-        log.warning(
-            "DATABASE_URL is configured but no legacy SQLite file was found at %s. "
-            "PostgreSQL will be initialized without importing old SQLite records.",
-            DB_PATH,
+        raise RuntimeError(
+            "Legacy SQLite database not found at %s; refusing to start an empty PostgreSQL database. "
+            "Restore the old SQLite file or explicitly confirm a fresh start before deploying."
+            % DB_PATH
         )
-        return
     source = None
     try:
         source = sqlite3.connect(DB_PATH)
