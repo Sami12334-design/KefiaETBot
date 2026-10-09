@@ -4061,6 +4061,21 @@ async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYP
             log.warning("Could not notify task owner %s", task_owner_uid)
 
 
+async def log_own_membership_change(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Log when Telegram changes KefiaETBot's own membership in a chat."""
+    change = update.my_chat_member
+    if not change:
+        return
+    chat = change.chat
+    old_status = change.old_chat_member.status
+    new_status = change.new_chat_member.status
+    actor = change.from_user.id if change.from_user else "unknown"
+    log.warning(
+        "BOT_MEMBERSHIP_CHANGE chat_id=%s chat_title=%r chat_type=%s old_status=%s new_status=%s actor_user_id=%s",
+        chat.id, chat.title or "", chat.type, old_status, new_status, actor
+    )
+
+
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.exception("Unhandled update error", exc_info=context.error)
 
@@ -4108,6 +4123,7 @@ def main():
     app.add_handler(CommandHandler("myads", my_ads_command))
     app.add_handler(CallbackQueryHandler(menu))
     app.add_handler(ChatMemberHandler(track_channel_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(ChatMemberHandler(log_own_membership_change, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_receipt_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
@@ -4118,7 +4134,7 @@ def main():
     asyncio.set_event_loop(loop)
     try:
         app.run_polling(
-            allowed_updates=["message", "callback_query", "chat_member"],
+            allowed_updates=["message", "callback_query", "chat_member", "my_chat_member"],
             close_loop=False,
         )
     finally:
