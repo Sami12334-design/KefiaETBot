@@ -2,6 +2,7 @@ import os
 import asyncio
 import sqlite3
 import json
+import math
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -521,7 +522,7 @@ async def handle_crypto_text(update, context, action, data, value):
     if action == "buy_amount":
         try:
             amount = float(value.replace(",", "."))
-            if amount < 1 or amount > 100000000 or not amount.is_integer() and len(value.split(".")[-1]) > 8:
+            if not math.isfinite(amount) or amount < 1 or amount > 100000000 or (not amount.is_integer() and len(value.split(".")[-1]) > 8):
                 raise ValueError()
         except ValueError:
             await message.reply_text("Enter a valid USDT amount of at least 1 (up to 8 decimal places).")
@@ -589,7 +590,7 @@ async def handle_crypto_text(update, context, action, data, value):
     if action == "sell_amount":
         try:
             amount = float(value.replace(",", "."))
-            if amount < 1 or amount > 100000000 or (not amount.is_integer() and len(value.split(".")[-1]) > 8):
+            if not math.isfinite(amount) or amount < 1 or amount > 100000000 or (not amount.is_integer() and len(value.split(".")[-1]) > 8):
                 raise ValueError()
         except ValueError:
             await message.reply_text("Enter a valid USDT amount of at least 1 (up to 8 decimal places).")
@@ -1055,6 +1056,14 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "and the corresponding sell_usdt_rate_* keys, plus buy_payment_*, sell_payout_*, sell_network_*, "
             "buy_enabled, sell_enabled, buy_unavailable_message, or sell_unavailable_message."
         ); return
+    clearable_rate = key in {"buy_usdt_rate_1_2", "buy_usdt_rate_2_5", "buy_usdt_rate_5_plus",
+                            "sell_usdt_rate_1_2", "sell_usdt_rate_2_5", "sell_usdt_rate_5_plus"}
+    clearable_detail = key.startswith(("buy_payment_", "sell_network_")) and key.endswith(("_details", "_destination"))
+    if value.strip().lower() == "none" and (clearable_rate or clearable_detail):
+        with db() as c:
+            c.execute("DELETE FROM settings WHERE key=?", (key,))
+        await update.effective_message.reply_text(f"Deleted setting {key}.")
+        return
     if key.endswith("_enabled") or key in ("buy_enabled", "sell_enabled"):
         normalized = value.strip().lower()
         if normalized not in ("true", "false", "1", "0", "yes", "no", "on", "off", "enabled", "disabled"):
