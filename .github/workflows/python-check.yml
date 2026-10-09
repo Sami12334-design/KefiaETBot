@@ -1,0 +1,24 @@
+name: Python checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile bot
+        run: python -m py_compile bot.py
+      - name: Initialize database
+        env:
+          DATABASE_PATH: /tmp/kefiaetbot-test.db
+        run: python -c "import bot; bot.init_db(); print('Database initialization passed')"
