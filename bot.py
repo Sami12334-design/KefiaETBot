@@ -143,6 +143,12 @@ def init_db():
            "The redeem link must be used within the time set by the admin.",
            "Activation links may expire if not claimed in time.",
            "No warranty",1,now()))
+        # Keep the seeded Gemini Pro placeholder out of the customer catalogue until
+        # an admin configures both a real price and available stock.
+        c.execute(
+            "UPDATE digital_products SET active=0,updated_at=? WHERE id='gemini_pro_18m' AND price=0 AND stock=0",
+            (now(),)
+        )
         for key, value in (
             ("buy_usdt_stock", "0"), ("buy_usdt_rate", "0"), ("buy_usdt_min", "1"),
             ("buy_usdt_max", "1000"), ("buy_usdt_bep20_min", "1"), ("buy_usdt_bybit_min", "1"),
