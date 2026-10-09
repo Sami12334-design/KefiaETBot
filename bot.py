@@ -1378,6 +1378,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only.")
             return
+        # Returning to this menu cancels an unfinished single-setting edit.
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='admin_setting_value'", (uid,))
         await q.edit_message_text(
             "⚙️ Prices & Limits\\n\\nChoose one service to manage. You’ll see its settings separately, then the bot will ask for one value at a time.",
             reply_markup=kb([
