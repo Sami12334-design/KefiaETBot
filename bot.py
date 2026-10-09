@@ -1551,7 +1551,7 @@ async def handle_digital_admin_command(update, context, value):
             c.execute("INSERT INTO settings(key,value) VALUES('digital_waiting_message',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_text,))
         await msg.reply_text("Digital-order waiting message updated.")
         return True
-    if value.startswith("/digital_admin_chat "):
+    if value.startswith("/digital_admin_chat ") and value.strip().lower() != "/digital_admin_chat none":
         chat_value = value[len("/digital_admin_chat "):].strip()
         try:
             int(chat_value)
