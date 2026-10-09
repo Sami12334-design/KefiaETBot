@@ -134,6 +134,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = q.from_user.id
     action = q.data
     if action == "home":
+        # Dashboard acts as Cancel for any unfinished text-input flow.
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
         await q.edit_message_text("🏠 Main Dashboard", reply_markup=home_keyboard(is_admin(uid)))
     elif action == "jobs":
         with db() as c:
@@ -300,12 +303,23 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         table = {"ad":"ad_requests","wd":"withdrawals","mk":"market_listings"}[typ]
         status = "approved" if verb == "approve" else "rejected"
         with db() as c:
-            row = c.execute(f"SELECT user_id FROM {table} WHERE id=?", (int(rawid),)).fetchone()
-            if row:
-                c.execute(f"UPDATE {table} SET status=? WHERE id=?", (status,int(rawid)))
-        if row:
-            try: await context.bot.send_message(row["user_id"], f"Your {typ} request #{rawid} was {status} by an admin.")
-            except Exception: pass
+            select_extra = ", points" if typ == "wd" else ""
+            row = c.execute(f"SELECT user_id, status{select_extra} FROM {table} WHERE id=?", (int(rawid),)).fetchone()
+            changed = False
+            if row and row["status"] == "pending":
+                cur = c.execute(f"UPDATE {table} SET status=? WHERE id=? AND status='pending'", (status, int(rawid)))
+                changed = cur.rowcount == 1
+                # Return reserved points only once if an admin rejects a withdrawal.
+                if changed and typ == "wd" and verb == "reject":
+                    c.execute("UPDATE users SET points=points+? WHERE user_id=?", (row["points"], row["user_id"]))
+        if row and changed:
+            notice = f"Your {typ} request #{rawid} was {status} by an admin."
+            if typ == "wd" and verb == "reject":
+                notice += f" Your {row['points']} reserved points have been returned to your wallet."
+            try: await context.bot.send_message(row["user_id"], notice)
+            except Exception: log.warning("Could not notify user %s about request %s", row["user_id"], rawid)
+        elif row:
+            status = row["status"]
         await q.edit_message_text(f"Request #{rawid}: {status}.", reply_markup=kb([[("⬅️ Review queue","admin_queue")],[("⬅️ Admin Dashboard","admin")]]))
     else:
         await q.edit_message_text("This option is not available yet. Please try again later.", reply_markup=kb([[("⬅️ Dashboard","home")]]))
