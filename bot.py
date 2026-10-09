@@ -2157,6 +2157,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p:
         await message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
+    if action == "digital_receipt":
+        await message.reply_text(digital_template(
+            "digital_receipt_upload_prompt",
+            "📸 Please upload a clear payment receipt screenshot as a photo or document."
+        ))
+        return
+    if action == "digital_choose_gateway":
+        await message.reply_text(digital_template(
+            "digital_choose_gateway_prompt",
+            "💳 Please tap one of the payment method buttons shown above."
+        ))
+        return
     if action == "digital_admin_reply":
         state = decode_pending(data)
         await send_digital_admin_reply(update, context, int(state.get("order_id", 0)), value,
