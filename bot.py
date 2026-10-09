@@ -195,12 +195,11 @@ def init_db():
             ("digital_receipt_upload_prompt", "📸 After paying, upload a clear payment receipt screenshot as a photo or document."),
             ("digital_product_details_template", "🌟 {name} {duration}m\n\n💰 Price: {price} ETB each\n📦 In stock: {stock}\n\n📝 DESCRIPTION\n{description}\n\n✨ FEATURES\n{features}\n\n📌 Important Note:\n{note}\n\n🚨 NOTICE\n{notice}\n\n🎯 Price: {price} ETB / unit\n🛡️ Warranty: {warranty}\n\nTap Buy now when you are ready."),
             ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}"),
-            ("promoter_rules", "📣 PROMOTER PROGRAM RULES\n\n1. Share only your unique invite link provided by KefiaETBot.\n2. Only real, unique people who join the configured channel through your link count.\n3. Self-joins, duplicate accounts, fake members, and paid/fraudulent joins do not count.\n4. Your progress and points are tracked by the bot.\n5. Once you reach the campaign target and the minimum points requirement, you may request a withdrawal.\n6. Provide accurate Telebirr or CBE account details. Admins verify activity and payments.\n7. Do not spam or mislead people. Violations may result in disqualification.\n\nTap Agree & Confirm only if you accept these rules."),
+            ("promoter_rules", "📣 PROMOTER PROGRAM RULES\n\n1. Share only your unique invite link provided by KefiaETBot.\n2. Only real, unique people who join the configured channel through your link count.\n3. Self-joins, duplicate accounts, fake members, and paid/fraudulent joins do not count.\n4. Your progress and points are tracked by the bot.\n5. Once you reach the campaign target, you may request a withdrawal of your available points.\n6. Provide accurate Telebirr or CBE account details. Admins verify activity and payments.\n7. Do not spam or mislead people. Violations may result in disqualification.\n\nTap Agree & Confirm only if you accept these rules."),
             ("promoter_channel", ""),
             ("promoter_target", "100"),
             ("promoter_points_per_join", "1"),
-            ("promoter_min_withdraw_points", "100"),
-        ):
+                    ):
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key,value))
 
 
@@ -1627,7 +1626,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if profile["invite_link"]:
             msg += f"\n🔗 Your unique channel referral link:\n{profile['invite_link']}\n\nShare this link with real people. Only verified unique joins count."
         if completed >= target:
-            msg += "\n\n🎉 Target reached! If your wallet meets the minimum points requirement, you can request withdrawal."
+            msg += "\n\n🎉 Target reached! you can request withdrawal of your available points."
         await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress","promoter_stats")],[("💸 Withdraw points","withdraw")],[("⬅️ Promotion Center","ads")]]))
     elif action in ("ad_product","ad_members","ad_views"):
         labels = {"ad_product":"Product promotion","ad_members":"Channel member campaign","ad_views":"Views / reach campaign"}
@@ -2410,7 +2409,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await notify_admins(context, f"📣 NEW PROMOTER REGISTRATION\nUser: {user.id} (@{user.username or 'no_username'})\nName: {user.first_name or '—'}\nPayout method: {method}\nAccount number: {account_number}\nAccount holder: {value}\nStatus: {status}\nTarget: {target} verified joins\nPoints per join: {points_per_join}\nInvite link: {invite_link or 'NOT CREATED — check channel permissions'}")
         if invite_link:
             await message.reply_text(
-                f"🎉 Your promoter profile is saved!\n\n📡 Campaign target: {target} verified joins\n⭐ Reward: {points_per_join} points per verified join\n\n🔗 Your unique referral link:\n{invite_link}\n\nShare it with real people. Your dashboard tracks verified joins and points. Withdrawal unlocks after you reach the target and meet the minimum points requirement.",
+                f"🎉 Your promoter profile is saved!\n\n📡 Campaign target: {target} verified joins\n⭐ Reward: {points_per_join} points per verified join\n\n🔗 Your unique referral link:\n{invite_link}\n\nShare it with real people. Your dashboard tracks verified joins and points. Withdrawal unlocks when you reach the target and have points available.",
                 reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Promotion Center","ads")]])
             )
         else:
@@ -2966,7 +2965,7 @@ async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYP
                 f"Campaign progress: {new_count}/{target}."
             )
             if completed:
-                promoter_notice += "\n\n🎯 Target reached! Your withdrawal option is unlocked once you meet the minimum points requirement."
+                promoter_notice += "\n\n🎯 Target reached! you can now request withdrawal of your available points."
         else:
             joined_id = cmu.new_chat_member.user.id
             if joined_id == mapping["owner_user_id"]:
