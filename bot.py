@@ -3,6 +3,7 @@ import asyncio
 import sqlite3
 import json
 import math
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -143,6 +144,25 @@ def init_db():
            "Activation links may expire if not claimed in time.",
            "No warranty",1,now()))
         for key, value in (
+            ("buy_usdt_stock", "0"), ("buy_usdt_rate", "0"), ("buy_usdt_min", "1"),
+            ("buy_usdt_max", "1000"), ("buy_usdt_bep20_min", "1"), ("buy_usdt_bybit_min", "1"),
+            ("buy_usdt_processing_time", "1-2 hours"),
+            ("buy_usdt_amount_template", "💵 Buy USDT | USDT ይግዙ\n\n• Available stock (ያለው መጠን): {stock} USDT\n• Rate (ተመን): 1 USDT = {rate} ETB\n• Min / Max (አነስተኛ / ከፍተኛ): {minimum} - {maximum} USDT\n\n• BEP20 minimum: {bep20_min} USDT\n\n• Bybit UID minimum: {bybit_min} USDT\n\nEnter how much USDT you want to buy:\nምን ያህል USDT መግዛት ይፈልጋሉ? (ምሳሌ: 10)"),
+            ("buy_usdt_destination_template", "🔁 USDT receiving destination | USDT መቀበያ አድራሻ\n\nSend your Binance Pay ID where admin should send the USDT:\nUSDT የሚላክበትን Binance Pay ID ያስገቡ:"),
+            ("buy_usdt_payment_template", "Order summary\n• USDT: {amount} USDT\n• Pay: {total} ETB\n\n{payment_icon} {payment_name}\n\nNumber: {payment_number}\nName: {payment_account_name}\n\nSend the exact ETB amount, then upload a clear {payment_name} receipt screenshot.\n{receipt_amharic}\n\nAfter payment:\n{after_payment}\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{payment_warning}"),
+            ("buy_usdt_confirmation_template", "✅ Payment proof received!\n\n📦 Your order #{order_id} is now under review.\n⏳ We will process it as soon as possible — instantly when we are online; otherwise, please allow up to {processing_time}.\n\n🙏 Thank you for using."),
+            ("buy_usdt_admin_order_template", "💵 BUY USDT ORDER #{order_id}\nUser ID: {user_id}\nAmount: {amount} USDT\nRate: {rate} ETB/USDT\nTotal: {total} ETB\nReceiving destination: {destination}\nPayment method: {payment_name}\nStatus: Pending Approval"),
+            ("buy_usdt_amount_invalid", "Please enter a valid positive USDT amount."),
+            ("buy_usdt_amount_range_error", "Amount must be between {minimum} and {maximum} USDT."),
+            ("buy_usdt_stock_error", "Sorry, only {stock} USDT is currently available."),
+            ("buy_usdt_rate_error", "The USDT buy rate is not configured yet. Please contact an admin."),
+            ("buy_usdt_no_gateway", "Payment is temporarily unavailable. Please contact an admin."),
+            ("buy_usdt_destination_invalid", "Please enter a valid receiving ID or address."),
+            ("buy_usdt_config_error", "The admin has not configured valid Buy USDT limits. Please contact support."),
+            ("buy_usdt_state_expired", "Your order session expired. Please start again."),
+            ("buy_usdt_choose_gateway_prompt", "Choose your ETB payment method:"),
+            ("buy_usdt_menu_button", "💵 Buy USDT | USDT ይግዙ"),
+            ("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"),
             ("digital_waiting_message", "✅ Your receipt has been received. Please wait while the admin verifies your payment. You will receive your activation link shortly."),
             ("digital_no_stock_message", "This product is currently out of stock. Please check back later."),
             ("digital_no_gateway_message", "Payment is temporarily unavailable for this product. Please contact an admin."),
@@ -268,9 +288,62 @@ def decode_pending(data):
 
 
 def enabled_buy_methods():
-    return [(slug, label) for slug, label in PAYMENT_METHODS.items()
-            if setting_enabled(f"buy_payment_{slug}_enabled")
-            and setting_value(f"buy_payment_{slug}_details", "").strip()]
+    methods = []
+    for slug in PAYMENT_METHODS:
+        if not setting_enabled(f"buy_payment_{slug}_enabled"):
+            continue
+        details = setting_value(f"buy_payment_{slug}_details", "").strip()
+        number = setting_value(f"buy_payment_{slug}_number", "").strip()
+        account_name = setting_value(f"buy_payment_{slug}_account_name", "").strip()
+        if not (details or (number and account_name)):
+            continue
+        icon = setting_value(f"buy_payment_{slug}_icon", "").strip()
+        name = setting_value(f"buy_payment_{slug}_name", "").strip() or slug.upper()
+        methods.append((slug, f"{icon} {name}".strip()))
+    return methods
+
+
+def buy_usdt_decimal(key):
+    try:
+        value = Decimal(str(setting_value(key)))
+        return value if value.is_finite() else None
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+
+
+def buy_usdt_values(amount=None, total=None, gateway=None, order_id="", user_id="", destination=""):
+    gateway = gateway or {}
+    val = lambda key: setting_value(key, "") or ""
+    return {
+        "stock": val("buy_usdt_stock"), "rate": val("buy_usdt_rate"),
+        "minimum": val("buy_usdt_min"), "maximum": val("buy_usdt_max"),
+        "bep20_min": val("buy_usdt_bep20_min"), "bybit_min": val("buy_usdt_bybit_min"),
+        "processing_time": val("buy_usdt_processing_time"),
+        "amount": f"{Decimal(str(amount)):f}" if amount is not None else "",
+        "total": f"{Decimal(str(total)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):f}" if total is not None else "",
+        "payment_icon": gateway.get("icon", ""), "payment_name": gateway.get("name", ""),
+        "payment_number": gateway.get("number", ""), "payment_account_name": gateway.get("account_name", ""),
+        "receipt_amharic": gateway.get("receipt_amharic", ""), "after_payment": gateway.get("after_payment", ""),
+        "payment_warning": gateway.get("warning", ""), "order_id": order_id, "user_id": user_id,
+        "destination": destination,
+    }
+
+
+def buy_usdt_gateway(slug):
+    return {
+        "icon": setting_value(f"buy_payment_{slug}_icon", "").strip(),
+        "name": setting_value(f"buy_payment_{slug}_name", "").strip() or slug.upper(),
+        "number": setting_value(f"buy_payment_{slug}_number", "").strip(),
+        "account_name": setting_value(f"buy_payment_{slug}_account_name", "").strip(),
+        "details": setting_value(f"buy_payment_{slug}_details", "").strip(),
+        "receipt_amharic": setting_value(f"buy_payment_{slug}_receipt_amharic", "").strip(),
+        "after_payment": setting_value(f"buy_payment_{slug}_after_payment", "").strip(),
+        "warning": setting_value(f"buy_payment_{slug}_warning", "").strip(),
+    }
+
+
+def buy_usdt_amount_prompt():
+    return render_digital_template(setting_value("buy_usdt_amount_template", ""), buy_usdt_values())
 
 
 def enabled_sell_payout_methods():
@@ -321,19 +394,9 @@ async def start_crypto_flow(q, context, side):
             return
         # Empty custom message intentionally means: skip the unavailable notice and show the normal flow.
     if side == "buy":
-        methods = enabled_buy_methods()
-        if not methods:
-            await q.edit_message_text(
-                "🛒 Buy USDT is not configured yet. Please check back later.",
-                reply_markup=kb([[("⬅️ Marketplace", "market")], [("⬅️ Dashboard", "home")]]),
-            )
-            return
-        rows = [[(label, f"buy_method_{slug}")] for slug, label in methods]
-        rows.append([("❌ Cancel | አቋርጥ", "home")])
-        await q.edit_message_text(
-            "🛒 Buy USDT — Step 1\n\nChoose how you want to pay ETB. The payment destination and current rate will be shown before you submit proof.",
-            reply_markup=kb(rows),
-        )
+        set_pending(uid, "buy_usdt_amount", {})
+        await q.edit_message_text(buy_usdt_amount_prompt(),
+            reply_markup=kb([[(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")]]))
         return
 
     with db() as c:
@@ -356,6 +419,58 @@ async def start_crypto_flow(q, context, side):
         "ብር ይቀበሉበታል የሚፈልጉትን የክፍያ መንገድ ይምረጡ:",
         reply_markup=kb(rows),
     )
+
+
+async def create_buy_usdt_order_for_message(update, context, uid, state, slug):
+    gateway = buy_usdt_gateway(slug)
+    amount = Decimal(str(state.get("amount", "0")))
+    rate = buy_usdt_decimal("buy_usdt_rate")
+    stock = buy_usdt_decimal("buy_usdt_stock")
+    if rate is None or rate <= 0:
+        await update.effective_message.reply_text(setting_value("buy_usdt_rate_error", "Buy rate is not configured.")); return
+    if stock is None or amount <= 0 or amount > stock:
+        await update.effective_message.reply_text(render_digital_template(setting_value("buy_usdt_stock_error", ""), buy_usdt_values(amount=amount))); return
+    total = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    details = gateway["details"] or f"{gateway['icon']} {gateway['name']}\nNumber: {gateway['number']}\nName: {gateway['account_name']}"
+    with db() as c:
+        cur = c.execute(
+            "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,transfer_destination,status,created_at,updated_at) "
+            "VALUES(?,'buy',?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
+            (uid, float(amount), float(rate), float(total), slug, details, state["destination"], now(), now()),
+        )
+        order_id = cur.lastrowid
+    vals = buy_usdt_values(amount, total, gateway, order_id, uid, state["destination"])
+    await update.effective_message.reply_text(render_digital_template(setting_value("buy_usdt_payment_template", ""), vals),
+        reply_markup=kb([[(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")]]))
+    set_pending(uid, "buy_receipt", {"order_id": order_id})
+
+
+async def create_buy_usdt_order(q, uid, state, slug):
+    gateway = buy_usdt_gateway(slug)
+    amount = Decimal(str(state.get("amount", "0")))
+    rate = buy_usdt_decimal("buy_usdt_rate")
+    stock = buy_usdt_decimal("buy_usdt_stock")
+    if rate is None or rate <= 0:
+        await q.edit_message_text(setting_value("buy_usdt_rate_error", "Buy rate is not configured."),
+                                  reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+        return
+    if stock is None or amount <= 0 or amount > stock:
+        await q.edit_message_text(render_digital_template(setting_value("buy_usdt_stock_error", ""), buy_usdt_values(amount=amount)),
+                                  reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+        return
+    total = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    details = gateway["details"] or f"{gateway['icon']} {gateway['name']}\nNumber: {gateway['number']}\nName: {gateway['account_name']}"
+    with db() as c:
+        cur = c.execute(
+            "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,transfer_destination,status,created_at,updated_at) "
+            "VALUES(?,'buy',?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
+            (uid, float(amount), float(rate), float(total), slug, details, state["destination"], now(), now()),
+        )
+        order_id = cur.lastrowid
+    vals = buy_usdt_values(amount, total, gateway, order_id, uid, state["destination"])
+    await q.edit_message_text(render_digital_template(setting_value("buy_usdt_payment_template", ""), vals),
+                              reply_markup=kb([[(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")]]))
+    set_pending(uid, "buy_receipt", {"order_id": order_id})
 
 
 async def show_sell_networks(q, payout):
@@ -386,6 +501,40 @@ async def crypto_callback(update, context, action):
     uid = q.from_user.id
     if action in ("buy_usdt", "buy_asset", "sell_usdt"):
         await start_crypto_flow(q, context, "sell" if action == "sell_usdt" else "buy")
+        return
+
+    if action.startswith("buy_usdt_gateway_"):
+        slug = action[len("buy_usdt_gateway_"):]
+        if not setting_enabled(f"buy_payment_{slug}_enabled"):
+            await q.edit_message_text(setting_value("buy_usdt_no_gateway", "Payment is unavailable."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+        state = decode_pending(pending["data"]) if pending and pending["action"] == "buy_usdt_choose_gateway" else {}
+        if not state or "amount" not in state or "destination" not in state:
+            await q.edit_message_text(setting_value("buy_usdt_state_expired", "Session expired."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        await create_buy_usdt_order(q, uid, state, slug)
+        return
+
+    if action == "buy_usdt_continue_destination":
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+        state = decode_pending(pending["data"]) if pending and pending["action"] == "buy_usdt_destination" else {}
+        methods = enabled_buy_methods()
+        if not state or not methods:
+            await q.edit_message_text(setting_value("buy_usdt_no_gateway", "Payment is unavailable."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        if len(methods) == 1:
+            await create_buy_usdt_order(q, uid, state, methods[0][0])
+        else:
+            set_pending(uid, "buy_usdt_choose_gateway", state)
+            rows = [[(label, f"buy_usdt_gateway_{slug}")] for slug, label in methods]
+            rows.append([(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")])
+            await q.edit_message_text(setting_value("buy_usdt_choose_gateway_prompt", "Choose your ETB payment method:"), reply_markup=kb(rows))
         return
 
     if action.startswith("buy_method_"):
@@ -560,6 +709,58 @@ async def handle_crypto_text(update, context, action, data, value):
     message = update.effective_message
     uid = user.id
     state = decode_pending(data)
+
+    if action == "buy_usdt_amount":
+        try:
+            amount = Decimal(value.replace(",", "."))
+            if not amount.is_finite() or amount <= 0 or amount.as_tuple().exponent < -8:
+                raise InvalidOperation()
+        except (InvalidOperation, ValueError):
+            await message.reply_text(setting_value("buy_usdt_amount_invalid", "Please enter a valid positive USDT amount."))
+            return True
+        minimum, maximum, stock = (buy_usdt_decimal(k) for k in ("buy_usdt_min", "buy_usdt_max", "buy_usdt_stock"))
+        if minimum is None or maximum is None or stock is None or minimum <= 0 or maximum < minimum or stock < 0:
+            await message.reply_text(setting_value("buy_usdt_config_error", "Buy USDT limits are not configured correctly."))
+            return True
+        if amount < minimum or amount > maximum:
+            await message.reply_text(render_digital_template(setting_value("buy_usdt_amount_range_error", ""),
+                                                              buy_usdt_values(amount=amount)))
+            return True
+        if amount > stock:
+            await message.reply_text(render_digital_template(setting_value("buy_usdt_stock_error", ""),
+                                                              buy_usdt_values(amount=amount)))
+            return True
+        rate = buy_usdt_decimal("buy_usdt_rate")
+        if rate is None or rate <= 0:
+            await message.reply_text(setting_value("buy_usdt_rate_error", "Buy rate is not configured."))
+            return True
+        set_pending(uid, "buy_usdt_destination", {"amount": str(amount)})
+        await message.reply_text(setting_value("buy_usdt_destination_template", ""),
+            reply_markup=kb([[(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")]]))
+        return True
+
+    if action == "buy_usdt_destination":
+        if not value or len(value) > 180:
+            await message.reply_text(setting_value("buy_usdt_destination_invalid", "Enter a valid receiving ID."))
+            return True
+        amount = Decimal(str(state.get("amount", "0")))
+        stock = buy_usdt_decimal("buy_usdt_stock")
+        if stock is None or amount > stock:
+            await message.reply_text(render_digital_template(setting_value("buy_usdt_stock_error", ""), buy_usdt_values(amount=amount)))
+            return True
+        state["destination"] = value
+        methods = enabled_buy_methods()
+        if not methods:
+            await message.reply_text(setting_value("buy_usdt_no_gateway", "Payment is unavailable."))
+            return True
+        if len(methods) == 1:
+            await create_buy_usdt_order_for_message(update, context, uid, state, methods[0][0])
+        else:
+            set_pending(uid, "buy_usdt_choose_gateway", state)
+            rows = [[(label, f"buy_usdt_gateway_{slug}")] for slug, label in methods]
+            rows.append([(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")])
+            await message.reply_text(setting_value("buy_usdt_choose_gateway_prompt", "Choose your ETB payment method:"), reply_markup=kb(rows))
+        return True
 
     if action == "buy_amount":
         try:
@@ -1092,7 +1293,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Promotions","ads")],[("⬅️ Dashboard","home")]]))
     elif action == "market":
         rows = [
-            [("🛒 Buy USDT","buy_usdt")],
+            [(setting_value("buy_usdt_menu_button", "💵 Buy USDT | USDT ይግዙ"),"buy_usdt")],
             [("📲 Buy social-media promotion/accounts","buy_social")],
             [("💸 Sell USDT | USDT ይሽጡ","sell_usdt")],
             [("📤 Sell a social-media asset","sell_social")],
@@ -1333,15 +1534,24 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
                 (receipt, now(), order_id, user.id),
             )
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await message.reply_text(
-            f"✅ Screenshot received for order #{order_id}. Admin will verify the actual transfer before completing your order."
-        )
-        caption = (
-            f"🪙 {order['side'].upper()} USDT order #{order_id}\nUser: {user.id}\n"
-            f"Amount: {order['amount_usdt']:g} USDT\nETB total: {order['total_etb']:g}\n"
-            "Status: pending admin approval. Verify the real transaction independently."
-        )
-        for aid in ADMIN_IDS:
+        if order["side"] == "buy":
+            vals = buy_usdt_values(amount=Decimal(str(order["amount_usdt"])), total=Decimal(str(order["total_etb"])),
+                                   order_id=order_id, user_id=user.id, destination=order["transfer_destination"] or "",
+                                   gateway={"name": order["payment_method"] or ""})
+            await message.reply_text(render_digital_template(setting_value("buy_usdt_confirmation_template", ""), vals))
+            caption = render_digital_template(setting_value("buy_usdt_admin_order_template", ""), vals)
+        else:
+            await message.reply_text(f"✅ Screenshot received for order #{order_id}. Admin will verify the actual transfer before completing your order.")
+            caption = (f"🪙 {order['side'].upper()} USDT order #{order_id}\nUser: {user.id}\n"
+                       f"Amount: {order['amount_usdt']:g} USDT\nETB total: {order['total_etb']:g}\n"
+                       "Status: pending admin approval. Verify the real transaction independently.")
+        configured_review_chat = setting_value("buy_usdt_admin_chat_id", "").strip() if order["side"] == "buy" else ""
+        try:
+            review_targets = [int(configured_review_chat)] if configured_review_chat else sorted(ADMIN_IDS)
+        except ValueError:
+            review_targets = sorted(ADMIN_IDS)
+            log.error("Invalid Buy USDT review chat ID; using configured admin accounts")
+        for aid in review_targets:
             try:
                 markup = kb([[("🔎 Review order", f"crypto_order_view_{order_id}")]])
                 if message.photo:
@@ -1406,7 +1616,7 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     allowed = {"min_withdraw_points","usdt_etb_rate","price_ad_product","price_ad_members","price_ad_views","referral_points"}
     dynamic = (
         key in {"buy_enabled", "sell_enabled", "buy_unavailable_message", "sell_unavailable_message"}
-        or key.startswith(("buy_payment_", "sell_payout_", "sell_network_"))
+        or key.startswith(("buy_payment_", "sell_payout_", "sell_network_", "buy_usdt_"))
         or key in {"buy_usdt_rate_1_2", "buy_usdt_rate_2_5", "buy_usdt_rate_5_plus",
                    "sell_usdt_rate_1_2", "sell_usdt_rate_2_5", "sell_usdt_rate_5_plus"}
     )
@@ -1429,11 +1639,13 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if normalized not in ("true", "false", "1", "0", "yes", "no", "on", "off", "enabled", "disabled"):
             await update.effective_message.reply_text("For enable/disable settings use true or false."); return
         value = "true" if normalized in ("true", "1", "yes", "on", "enabled") else "false"
-    elif key.endswith("_rate_1_2") or key.endswith("_rate_2_5") or key.endswith("_rate_5_plus") or key.startswith("price_") or key == "usdt_etb_rate":
+    elif key.endswith(("_rate_1_2", "_rate_2_5", "_rate_5_plus")) or key in {"buy_usdt_rate", "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock", "buy_usdt_bep20_min", "buy_usdt_bybit_min"} or key.startswith("price_") or key == "usdt_etb_rate":
         try:
-            if float(value) <= 0: raise ValueError()
-        except ValueError:
-            await update.effective_message.reply_text("Rates and prices must be numbers greater than zero."); return
+            number = Decimal(value)
+            if not number.is_finite() or number < 0 or (key in {"buy_usdt_rate", "buy_usdt_min"} and number == 0): raise ValueError()
+            if key == "buy_usdt_max" and buy_usdt_decimal("buy_usdt_min") is not None and number < buy_usdt_decimal("buy_usdt_min"): raise ValueError()
+        except (ValueError, InvalidOperation):
+            await update.effective_message.reply_text("Rates/minimum must be positive; stock, maximum and thresholds must be valid non-negative numbers."); return
     elif key == "min_withdraw_points":
         try:
             if int(value) < 1: raise ValueError()
