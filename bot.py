@@ -563,6 +563,10 @@ def required_channel_config():
 
 async def enforce_required_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Block non-admin users from using the bot until they join the configured channel."""
+    # This gate is only for private user messages and callback buttons; leave
+    # channel/group membership updates available to their dedicated handlers.
+    if not update.effective_message and not update.callback_query:
+        return
     user = update.effective_user
     if not user or is_admin(user.id):
         return
@@ -3117,7 +3121,7 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ); return
     clearable_rate = key in {"buy_usdt_rate_1_2", "buy_usdt_rate_2_5", "buy_usdt_rate_5_plus",
                             "sell_usdt_rate_1_2", "sell_usdt_rate_2_5", "sell_usdt_rate_5_plus"}
-    clearable_detail = key.startswith(("buy_payment_", "sell_network_")) and key.endswith(("_details", "_destination"))
+    clearable_detail = (key.startswith(("buy_payment_", "sell_network_")) and key.endswith(("_details", "_destination"))) or key == "force_join_url"
     if value.strip().lower() == "none" and (clearable_rate or clearable_detail):
         with db() as c:
             c.execute("DELETE FROM settings WHERE key=?", (key,))
