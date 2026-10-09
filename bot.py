@@ -366,7 +366,7 @@ async def receipt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def my_ads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with db() as c:
         rows = c.execute("SELECT id,kind,status,quoted_price FROM ad_requests WHERE user_id=? ORDER BY id DESC LIMIT 10", (update.effective_user.id,)).fetchall()
-    msg = "📋 Your ad requests\\n" + ("\\n".join(f"#{r['id']} · {r['kind']} · {r['status']} · {r['quoted_price'] if r['quoted_price'] is not None else 'quote pending'} ETB" for r in rows) if rows else "No ad requests yet.")
+    msg = "📋 Your ad requests\n" + ("\n".join(f"#{r['id']} · {r['kind']} · {r['status']} · {r['quoted_price'] if r['quoted_price'] is not None else 'quote pending'} ETB" for r in rows) if rows else "No ad requests yet.")
     await update.effective_message.reply_text(msg)
 
 
@@ -393,7 +393,16 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         c.execute("UPDATE ad_requests SET receipt=?,status='receipt_submitted' WHERE id=? AND user_id=?", (receipt, request_id, user.id))
         c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
     await message.reply_text("✅ Payment proof submitted. An admin will verify it manually before confirming the ad.")
-    await notify_admins(context, f"🧾 Payment proof submitted for ad request #{request_id} by user {user.id}. Open the Admin Dashboard to review it; verify the payment independently.")
+    caption = f"🧾 Payment proof for ad request #{request_id} from user {user.id}. Verify payment independently before approval."
+    for aid in ADMIN_IDS:
+        try:
+            if message.photo:
+                await context.bot.send_photo(aid, photo=message.photo[-1].file_id, caption=caption)
+            elif message.document:
+                await context.bot.send_document(aid, document=message.document.file_id, caption=caption)
+        except Exception:
+            log.warning("Could not forward receipt for ad request %s to admin %s", request_id, aid)
+    await notify_admins(context, f"🧾 Payment proof submitted for ad request #{request_id} by user {user.id}. Review it in the Admin Dashboard; verify payment independently.")
 
 
 async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
