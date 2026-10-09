@@ -2015,6 +2015,110 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Invalid user ID."); return
         set_pending(uid, "admin_promoter_message", {"user_id":promoter_uid})
         await q.edit_message_text(f"💬 Send the message you want to deliver to promoter {promoter_uid}.", reply_markup=kb([[("❌ Cancel",f"admin_promoter_user_{promoter_uid}")]]))
+    elif action == "admin_marketplace":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            items = c.execute("SELECT id,asset_type,status,listing_active,price,purchase_status FROM market_listings WHERE action='sell_social' ORDER BY id DESC LIMIT 25").fetchall()
+        rows = []
+        for item in items:
+            state = "LIVE" if item["listing_active"] else item["status"].upper()
+            price_label = f"{item['price']:g} ETB" if item["price"] is not None else "price unset"
+            rows.append([(f"#{item['id']} · {item['asset_type']} · {state} · {price_label}"[:62],f"admin_market_item_{item['id']}")])
+        rows.extend([[("🔄 Refresh","admin_marketplace")],[("⬅️ Admin Dashboard","admin")]])
+        await q.edit_message_text("🛍 SOCIAL ACCOUNT LISTINGS\n\nOpen a listing to edit its short description and price, publish/hide it, or message its seller/buyer. A listing must be approved and priced before publishing.", reply_markup=kb(rows))
+    elif action.startswith("admin_market_item_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: listing_id = int(action.removeprefix("admin_market_item_"))
+        except ValueError:
+            await q.edit_message_text("Invalid listing."); return
+        with db() as c:
+            item = c.execute("SELECT * FROM market_listings WHERE id=? AND action='sell_social'", (listing_id,)).fetchone()
+            buyer = c.execute("SELECT username,first_name FROM users WHERE user_id=?", (item["buyer_user_id"],)).fetchone() if item and item["buyer_user_id"] else None
+        if not item:
+            await q.edit_message_text("Listing not found.", reply_markup=kb([[("⬅️ Social account listings","admin_marketplace")]])); return
+        desc = item["short_description"] or item["details"] or "Not set"
+        msg = (f"🛍 LISTING #{listing_id}\nPlatform: {item['asset_type']}\nSeller ID: {item['user_id']}\n"
+               f"Status: {item['status']}\nPublished: {'Yes' if item['listing_active'] else 'No'}\n"
+               f"Price: {item['price'] if item['price'] is not None else 'Not set'} ETB\n"
+               f"Purchase status: {item['purchase_status']}\nBuyer ID: {item['buyer_user_id'] or 'None'}\n"
+               f"Payment method: {item['payment_method'] or 'None'}\nShort description:\n{desc[:900]}\n\nSeller submission:\n{(item['details'] or '')[:700]}")
+        rows = [
+            [("✏️ Edit short description",f"admin_market_desc_{listing_id}"),("💰 Set price",f"admin_market_price_{listing_id}")],
+            [("📣 Publish listing",f"admin_market_publish_{listing_id}"),("🙈 Hide listing",f"admin_market_hide_{listing_id}")],
+            [("💬 Message seller",f"admin_market_message_{listing_id}_seller")],
+        ]
+        if item["buyer_user_id"]:
+            rows.append([("💬 Message buyer",f"admin_market_message_{listing_id}_buyer")])
+        if item["receipt_file_id"]:
+            rows.append([("🧾 Resend receipt to admin",f"admin_market_receipt_{listing_id}")])
+        rows.extend([[("⬅️ All listings","admin_marketplace")],[("⬅️ Admin Dashboard","admin")]])
+        await q.edit_message_text(msg, reply_markup=kb(rows))
+    elif action.startswith("admin_market_price_") or action.startswith("admin_market_desc_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        prefix = "admin_market_price_" if action.startswith("admin_market_price_") else "admin_market_desc_"
+        try: listing_id = int(action.removeprefix(prefix))
+        except ValueError:
+            await q.edit_message_text("Invalid listing."); return
+        field = "price" if prefix.endswith("price_") else "description"
+        set_pending(uid,"admin_market_edit",{"listing_id":listing_id,"field":field})
+        prompt = "Send the sale price in ETB (a positive number)." if field == "price" else "Send the short customer-facing description (max 350 characters). This is what buyers will see before tapping Buy now."
+        await q.edit_message_text(f"✏️ Edit listing #{listing_id}\n\n{prompt}", reply_markup=kb([[("❌ Cancel",f"admin_market_item_{listing_id}")]]))
+    elif action.startswith("admin_market_publish_") or action.startswith("admin_market_hide_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        publish = action.startswith("admin_market_publish_")
+        prefix = "admin_market_publish_" if publish else "admin_market_hide_"
+        try: listing_id = int(action.removeprefix(prefix))
+        except ValueError:
+            await q.edit_message_text("Invalid listing."); return
+        with db() as c:
+            item = c.execute("SELECT status,price,short_description FROM market_listings WHERE id=? AND action='sell_social'", (listing_id,)).fetchone()
+            if publish and item and item["status"] == "approved" and item["price"] is not None and float(item["price"]) > 0 and item["short_description"].strip():
+                c.execute("UPDATE market_listings SET listing_active=1 WHERE id=?", (listing_id,))
+                published = True
+            elif not publish and item:
+                c.execute("UPDATE market_listings SET listing_active=0 WHERE id=?", (listing_id,))
+                published = False
+            else:
+                published = False
+        if publish and not published:
+            await q.edit_message_text("Cannot publish yet. First approve the listing, set a positive price, and add a short description.", reply_markup=kb([[("⬅️ Edit listing",f"admin_market_item_{listing_id}")]])); return
+        await q.edit_message_text("✅ Listing published." if published else "✅ Listing hidden.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")],[("⬅️ All listings","admin_marketplace")]]))
+    elif action.startswith("admin_market_message_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        parts = action.split("_")
+        try: listing_id = int(parts[3]); recipient_role = parts[4]
+        except (ValueError,IndexError):
+            await q.edit_message_text("Invalid message action."); return
+        if recipient_role not in ("seller","buyer"):
+            await q.edit_message_text("Invalid recipient."); return
+        with db() as c:
+            item = c.execute("SELECT user_id,buyer_user_id FROM market_listings WHERE id=?", (listing_id,)).fetchone()
+        target_user = (item["user_id"] if recipient_role == "seller" else item["buyer_user_id"]) if item else None
+        if not target_user:
+            await q.edit_message_text("This listing has no such recipient.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")]])); return
+        set_pending(uid,"admin_market_message",{"listing_id":listing_id,"target_user_id":target_user,"recipient_role":recipient_role})
+        await q.edit_message_text(f"💬 Send a text message or upload a photo/document to the {recipient_role} of listing #{listing_id}.", reply_markup=kb([[("❌ Cancel",f"admin_market_item_{listing_id}")]]))
+    elif action.startswith("admin_market_receipt_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: listing_id = int(action.removeprefix("admin_market_receipt_"))
+        except ValueError:
+            await q.edit_message_text("Invalid listing."); return
+        with db() as c:
+            item = c.execute("SELECT receipt_file_id,receipt_type,buyer_user_id,price,payment_method FROM market_listings WHERE id=?", (listing_id,)).fetchone()
+        if not item or not item["receipt_file_id"]:
+            await q.edit_message_text("No receipt saved for this listing."); return
+        caption = f"SOCIAL ACCOUNT PURCHASE #{listing_id}\nBuyer: {item['buyer_user_id']}\nPrice: {item['price']} ETB\nPayment: {item['payment_method']}\nVerify payment independently."
+        if item["receipt_type"] == "photo":
+            await context.bot.send_photo(uid,item["receipt_file_id"],caption=caption)
+        else:
+            await context.bot.send_document(uid,item["receipt_file_id"],caption=caption)
+        await q.edit_message_text("🧾 Receipt sent to your admin chat.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")]]))
     elif action == "admin_queue":
         if not is_admin(uid): return
         with db() as c:
@@ -2484,6 +2588,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if match and value:
             await send_digital_admin_reply(update, context, int(match.group(1)), value, reject=False)
             return
+        market_match = re.search(r"SOCIAL ACCOUNT PURCHASE #([0-9]+)", caption)
+        if market_match and value:
+            listing_id = int(market_match.group(1))
+            with db() as c:
+                item = c.execute("SELECT buyer_user_id FROM market_listings WHERE id=?", (listing_id,)).fetchone()
+            if item and item["buyer_user_id"]:
+                try:
+                    await context.bot.send_message(item["buyer_user_id"], f"📩 Message from KefiaETBot admin about your social-account purchase #{listing_id}:\n\n{value}")
+                    await message.reply_text("✅ Message sent to the buyer.")
+                except Exception:
+                    await message.reply_text("Could not deliver the message to the buyer.")
+                return
 
     # Database-backed admin commands for products, gateways and editable user messages.
     if is_admin(user.id) and await handle_digital_admin_command(update, context, value):
@@ -2494,6 +2610,52 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p:
         await message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
+    if action == "admin_market_edit":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        listing_id = int(state.get("listing_id",0))
+        field = state.get("field")
+        if not listing_id or field not in {"price","description"}:
+            await message.reply_text("This listing edit session expired."); return
+        with db() as c:
+            exists = c.execute("SELECT id FROM market_listings WHERE id=? AND action='sell_social'", (listing_id,)).fetchone()
+        if not exists:
+            await message.reply_text("Listing not found."); return
+        if field == "price":
+            try:
+                price = float(value)
+                if price <= 0 or price > 100000000: raise ValueError()
+            except ValueError:
+                await message.reply_text("Enter a positive price in ETB, for example 1500."); return
+            with db() as c:
+                c.execute("UPDATE market_listings SET price=? WHERE id=?", (price,listing_id))
+        else:
+            if len(value) > 350:
+                await message.reply_text("Please keep the short description within 350 characters."); return
+            with db() as c:
+                c.execute("UPDATE market_listings SET short_description=? WHERE id=?", (value,listing_id))
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text("✅ Listing updated. Publish it when the listing is approved, priced, and has a short description.", reply_markup=kb([[("🛍 Open listing",f"admin_market_item_{listing_id}")],[("⬅️ All listings","admin_marketplace")]]))
+        return
+    if action == "admin_market_message":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        target_user = int(state.get("target_user_id",0))
+        listing_id = int(state.get("listing_id",0))
+        if not target_user or not value:
+            await message.reply_text("Message cannot be empty."); return
+        try:
+            await context.bot.send_message(target_user, f"📩 Message from KefiaETBot admin about social account listing #{listing_id}:\n\n{value}")
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ Message sent.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")]]))
+        except Exception:
+            await message.reply_text("Could not deliver the message. The user may have blocked the bot.")
+        return
+    if action == "account_buy_receipt":
+        await message.reply_text("📸 Please upload your payment screenshot as a photo or document so an admin can review it.")
+        return
     if action == "promoter_choose_method":
         await message.reply_text("Please tap Telebirr or CBE using the buttons shown above.")
         return
@@ -3011,7 +3173,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
         await update.effective_message.reply_text("✅ Ad request submitted. An admin will review your details and send the final quote and payment instructions. Do not pay until the quote is confirmed.")
         await notify_admins(context, f"📣 New ad request from user {user.id}: {data}\nDetails: {value}")
-    elif action in ("buy_asset","buy_social","sell_usdt","sell_social"):
+    elif action == "sell_social":
+        state = decode_pending(data)
+        platform = state.get("platform","Social media")
+        short_description = value[:350]
+        with db() as c:
+            cur = c.execute("INSERT INTO market_listings(user_id,action,asset_type,details,short_description,created_at) VALUES(?,?,?,?,?,?)",
+                            (user.id,action,platform,value,short_description,now()))
+            listing_id = cur.lastrowid
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await update.effective_message.reply_text(f"✅ Your {platform} account listing #{listing_id} was submitted for admin review. It will appear in Buy social media accounts only after an admin approves it, sets the price and publishes it. Never send passwords or verification codes.")
+        await notify_admins(context, f"🛍 SOCIAL ACCOUNT LISTING #{listing_id}\nSeller: {user.id}\nPlatform: {platform}\nSubmission: {value}\n\nReview it in Admin Dashboard → Social account listings. Set the public short description and price, approve it in Review requests if needed, then publish.")
+    elif action in ("buy_asset","sell_usdt"):
         with db() as c:
             c.execute("INSERT INTO market_listings(user_id,action,asset_type,details,created_at) VALUES(?,?,?,?,?)",(user.id,action,data,value,now()))
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
