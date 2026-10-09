@@ -288,7 +288,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "admin_queue":
         if not is_admin(uid): return
         with db() as c:
-            ads = c.execute("SELECT id,user_id,kind,status FROM ad_requests WHERE status='pending' ORDER BY id LIMIT 8").fetchall()
+            ads = c.execute("SELECT id,user_id,kind,status FROM ad_requests WHERE status IN ('pending','receipt_submitted') ORDER BY id LIMIT 8").fetchall()
             wds = c.execute("SELECT id,user_id,points,status FROM withdrawals WHERE status='pending' ORDER BY id LIMIT 8").fetchall()
             mks = c.execute("SELECT id,user_id,action,asset_type,status FROM market_listings WHERE status='pending' ORDER BY id LIMIT 8").fetchall()
         rows = []
@@ -306,8 +306,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             select_extra = ", points" if typ == "wd" else ""
             row = c.execute(f"SELECT user_id, status{select_extra} FROM {table} WHERE id=?", (int(rawid),)).fetchone()
             changed = False
-            if row and row["status"] == "pending":
-                cur = c.execute(f"UPDATE {table} SET status=? WHERE id=? AND status='pending'", (status, int(rawid)))
+            allowed_statuses = ("pending", "receipt_submitted") if typ == "ad" else ("pending",)
+            if row and row["status"] in allowed_statuses:
+                placeholders = ",".join("?" for _ in allowed_statuses)
+                cur = c.execute(f"UPDATE {table} SET status=? WHERE id=? AND status IN ({placeholders})", (status, int(rawid), *allowed_statuses))
                 changed = cur.rowcount == 1
                 # Return reserved points only once if an admin rejects a withdrawal.
                 if changed and typ == "wd" and verb == "reject":
@@ -323,6 +325,75 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"Request #{rawid}: {status}.", reply_markup=kb([[("⬅️ Review queue","admin_queue")],[("⬅️ Admin Dashboard","admin")]]))
     else:
         await q.edit_message_text("This option is not available yet. Please try again later.", reply_markup=kb([[("⬅️ Dashboard","home")]]))
+
+
+async def quote_ad(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.effective_message.reply_text("Admin only."); return
+    if len(context.args) < 3:
+        await update.effective_message.reply_text("Usage: /quote_ad REQUEST_ID PRICE_ETB PAYMENT_INSTRUCTIONS"); return
+    try:
+        request_id = int(context.args[0]); price = float(context.args[1])
+        if request_id < 1 or price < 0: raise ValueError()
+    except ValueError:
+        await update.effective_message.reply_text("Request ID must be a positive whole number and price must be zero or more."); return
+    instructions = " ".join(context.args[2:])
+    with db() as c:
+        row = c.execute("SELECT user_id,status,kind FROM ad_requests WHERE id=?", (request_id,)).fetchone()
+        if not row or row["status"] not in ("pending", "quoted"):
+            await update.effective_message.reply_text("Ad request not found or it is no longer awaiting a quote."); return
+        c.execute("UPDATE ad_requests SET quoted_price=?,status='quoted' WHERE id=?", (price, request_id))
+    try:
+        await context.bot.send_message(row["user_id"], f"📣 Quote for ad request #{request_id}\nService: {row['kind']}\nPrice: {price:g} ETB\nPayment instructions: {instructions}\n\nAfter paying, send /receipt {request_id} and upload a screenshot or send the transaction reference. Do not pay if anything looks suspicious; contact an admin first.")
+    except Exception:
+        log.warning("Could not send quote to user %s", row["user_id"])
+    await update.effective_message.reply_text(f"Quote saved for ad request #{request_id}.")
+
+
+async def receipt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /receipt AD_REQUEST_ID"); return
+    request_id = int(context.args[0])
+    with db() as c:
+        row = c.execute("SELECT status FROM ad_requests WHERE id=? AND user_id=?", (request_id, user.id)).fetchone()
+        if not row or row["status"] != "quoted":
+            await update.effective_message.reply_text("I couldn't find a quoted ad request for your account. Check /myads or contact an admin."); return
+        c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'ad_receipt',?) ON CONFLICT(user_id) DO UPDATE SET action='ad_receipt',data=excluded.data", (user.id, str(request_id)))
+    await update.effective_message.reply_text("Send your payment screenshot as a photo/document, or send the transaction reference as text. This only submits proof for admin review; it does not automatically confirm payment.")
+
+
+async def my_ads_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    with db() as c:
+        rows = c.execute("SELECT id,kind,status,quoted_price FROM ad_requests WHERE user_id=? ORDER BY id DESC LIMIT 10", (update.effective_user.id,)).fetchall()
+    msg = "📋 Your ad requests\\n" + ("\\n".join(f"#{r['id']} · {r['kind']} · {r['status']} · {r['quoted_price'] if r['quoted_price'] is not None else 'quote pending'} ETB" for r in rows) if rows else "No ad requests yet.")
+    await update.effective_message.reply_text(msg)
+
+
+async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message:
+        return
+    with db() as c:
+        pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+        if not pending or pending["action"] != "ad_receipt":
+            return
+        request_id = int(pending["data"])
+        owned = c.execute("SELECT id FROM ad_requests WHERE id=? AND user_id=? AND status='quoted'", (request_id, user.id)).fetchone()
+        if not owned:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("That ad request is no longer waiting for payment proof."); return
+        if message.photo:
+            receipt = "photo:" + message.photo[-1].file_id
+        elif message.document:
+            receipt = "document:" + message.document.file_id
+        else:
+            await message.reply_text("Please send a photo or document as payment proof."); return
+        c.execute("UPDATE ad_requests SET receipt=?,status='receipt_submitted' WHERE id=? AND user_id=?", (receipt, request_id, user.id))
+        c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+    await message.reply_text("✅ Payment proof submitted. An admin will verify it manually before confirming the ad.")
+    await notify_admins(context, f"🧾 Payment proof submitted for ad request #{request_id} by user {user.id}. Open the Admin Dashboard to review it; verify the payment independently.")
 
 
 async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -391,6 +462,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
         await update.effective_message.reply_text("✅ Withdrawal request submitted for admin review. Points are reserved until the request is approved or rejected.")
         await notify_admins(context, f"💸 New withdrawal request from {user.id}. Review in Admin Dashboard.")
+    elif action == "ad_receipt":
+        request_id = int(data)
+        with db() as c:
+            cur = c.execute("UPDATE ad_requests SET receipt=?,status='receipt_submitted' WHERE id=? AND user_id=? AND status='quoted'", (value, request_id, user.id))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        if cur.rowcount:
+            await update.effective_message.reply_text("✅ Transaction reference submitted. An admin will verify it manually.")
+            await notify_admins(context, f"🧾 Transaction reference submitted for ad request #{request_id} by user {user.id}. Reference: {value}")
+        else:
+            await update.effective_message.reply_text("That ad request is no longer waiting for payment proof.")
     elif action.startswith("ad_"):
         with db() as c:
             c.execute("INSERT INTO ad_requests(user_id,kind,details,duration,created_at) VALUES(?,?,?,?,?)",(user.id,data,value,"user specified",now()))
@@ -477,8 +558,12 @@ def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set", set_setting))
+    app.add_handler(CommandHandler("quote_ad", quote_ad))
+    app.add_handler(CommandHandler("receipt", receipt_command))
+    app.add_handler(CommandHandler("myads", my_ads_command))
     app.add_handler(CallbackQueryHandler(menu))
     app.add_handler(ChatMemberHandler(track_channel_member, ChatMemberHandler.CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_receipt_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
     log.info("KefiaETBot starting")
