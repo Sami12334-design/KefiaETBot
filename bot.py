@@ -1375,22 +1375,93 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             joins = c.execute("SELECT COUNT(*) n FROM invite_events").fetchone()["n"]
         await q.edit_message_text(f"📊 Platform Statistics\nUsers: {users}\nTasks: {tasks}\nTracked unique joins: {joins}\nPending ad requests: {ads}\nPending withdrawals: {wd}\nPending marketplace listings: {listings}", reply_markup=kb([[("⬅️ Admin Dashboard","admin")]]))
     elif action == "admin_settings":
-        if not is_admin(uid): return
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        await q.edit_message_text(
+            "⚙️ Prices & Limits\\n\\nChoose one service to manage. You’ll see its settings separately, then the bot will ask for one value at a time.",
+            reply_markup=kb([
+                [("📣 Ads & Promotion","admin_setgroup_ads")],
+                [("🎁 Rewards & Withdrawals","admin_setgroup_rewards")],
+                [("💵 Buy USDT","admin_setgroup_buyusdt")],
+                [("⬅️ Admin Dashboard","admin")]
+            ])
+        )
+    elif action.startswith("admin_setgroup_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        group = action.removeprefix("admin_setgroup_")
+        groups = {
+            "ads": ("📣 Ads & Promotion", [
+                ("Product promotion price (ETB)", "price_ad_product"),
+                ("Member promotion price (ETB)", "price_ad_members"),
+                ("Views promotion price (ETB)", "price_ad_views"),
+            ]),
+            "rewards": ("🎁 Rewards & Withdrawals", [
+                ("Minimum withdrawal points", "min_withdraw_points"),
+                ("Referral reward points", "referral_points"),
+            ]),
+            "buyusdt": ("💵 Buy USDT", [
+                ("Buy rate (ETB per USDT)", "buy_usdt_rate"),
+                ("Minimum order (USDT)", "buy_usdt_min"),
+                ("Maximum order (USDT)", "buy_usdt_max"),
+                ("Available stock (USDT)", "buy_usdt_stock"),
+                ("BEP20 minimum (USDT)", "buy_usdt_bep20_min"),
+                ("Bybit minimum (USDT)", "buy_usdt_bybit_min"),
+                ("Processing time message", "buy_usdt_processing_time"),
+            ]),
+        }
+        if group not in groups:
+            await q.edit_message_text("That settings group is unavailable.", reply_markup=kb([[("⬅️ Prices & Limits","admin_settings")]]))
+            return
+        title, items = groups[group]
+        rows = []
+        for label, key in items:
+            current = setting_value(key, "Not set")
+            rows.append([(f"{label}: {str(current)[:18]}", f"admin_setkey_{key}")])
+        rows.extend([[("⬅️ Service groups","admin_settings")], [("⬅️ Admin Dashboard","admin")]])
+        await q.edit_message_text(f"{title}\\n\\nChoose the one setting you want to change:", reply_markup=kb(rows))
+    elif action.startswith("admin_setkey_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        key = action.removeprefix("admin_setkey_")
+        allowed_keys = {
+            "price_ad_product", "price_ad_members", "price_ad_views",
+            "min_withdraw_points", "referral_points", "buy_usdt_rate",
+            "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
+            "buy_usdt_bep20_min", "buy_usdt_bybit_min", "buy_usdt_processing_time",
+        }
+        if key not in allowed_keys:
+            await q.edit_message_text("That setting is not available here.", reply_markup=kb([[("⬅️ Prices & Limits","admin_settings")]]))
+            return
         with db() as c:
-            settings = c.execute("SELECT key,value FROM settings ORDER BY key").fetchall()
-        msg = "⚙️ Current settings\n" + ("\n".join(f"{r['key']} = {r['value']}" for r in settings) if settings else "No custom settings configured.")
-        msg += ("\n\nUse /set KEY VALUE to update settings. Crypto examples:\n"
-                "/set buy_usdt_stock 100\n/set buy_usdt_rate 150\n/set buy_usdt_min 1\n/set buy_usdt_max 500\n"
-                "/set buy_usdt_bep20_min 10\n/set buy_usdt_bybit_min 5\n/set buy_usdt_processing_time 1-2 hours\n"
-                "/set buy_payment_telebirr_enabled true\n/set buy_payment_telebirr_icon 📱\n"
-                "/set buy_payment_telebirr_name Telebirr\n/set buy_payment_telebirr_number YOUR_NUMBER\n"
-                "/set buy_payment_telebirr_account_name YOUR_ACCOUNT_NAME\n/set buy_payment_telebirr_receipt_amharic YOUR_AMHARIC_TEXT\n"
-                "/set buy_payment_telebirr_after_payment YOUR_ENGLISH_TEXT\n/set buy_payment_telebirr_warning YOUR_WARNING\n"
-                "/set buy_usdt_admin_chat_id YOUR_NUMERIC_GROUP_ID\n"
-                "Edit all Buy USDT text templates with /set buy_usdt_*_template TEXT and error messages with their buy_usdt_* keys. "
-                "Payment fields use buy_payment_METHOD_name/icon/number/account_name/receipt_amharic/after_payment/warning. "
-                "All numeric examples are placeholders; configure actual values before enabling sales.")
-        await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Admin Dashboard","admin")]]))
+            c.execute(
+                "INSERT INTO pending_inputs(user_id,action,data) VALUES(?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET action=excluded.action,data=excluded.data",
+                (uid, "admin_setting_value", key)
+            )
+        labels = {
+            "price_ad_product": "Product promotion price in ETB",
+            "price_ad_members": "Member promotion price in ETB",
+            "price_ad_views": "Views promotion price in ETB",
+            "min_withdraw_points": "Minimum withdrawal points",
+            "referral_points": "Referral reward points",
+            "buy_usdt_rate": "Buy rate in ETB per USDT",
+            "buy_usdt_min": "Minimum Buy USDT order",
+            "buy_usdt_max": "Maximum Buy USDT order",
+            "buy_usdt_stock": "Available Buy USDT stock",
+            "buy_usdt_bep20_min": "BEP20 minimum order",
+            "buy_usdt_bybit_min": "Bybit minimum order",
+            "buy_usdt_processing_time": "Processing time message",
+        }
+        current = setting_value(key, "Not set")
+        await q.edit_message_text(
+            f"✏️ Change: {labels[key]}\\n\\nCurrent value: {current}\\n\\nSend the new value in one message. "
+            "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours.",
+            reply_markup=kb([[("❌ Cancel","admin_settings")]])
+        )
     elif action == "admin_queue":
         if not is_admin(uid): return
         with db() as c:
@@ -1874,6 +1945,87 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = decode_pending(data)
         await send_digital_admin_reply(update, context, int(state.get("order_id", 0)), value,
                                        reject=bool(state.get("reject", False)))
+        return
+    if action == "admin_setting_value":
+        if not is_admin(user.id):
+            with db() as c:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only.")
+            return
+        key = str(data or "")
+        allowed_keys = {
+            "price_ad_product", "price_ad_members", "price_ad_views",
+            "min_withdraw_points", "referral_points", "buy_usdt_rate",
+            "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
+            "buy_usdt_bep20_min", "buy_usdt_bybit_min", "buy_usdt_processing_time",
+        }
+        if key not in allowed_keys:
+            with db() as c:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("That setting is no longer available. Please reopen Prices & Limits.")
+            return
+        if not value:
+            await message.reply_text("Please send a value, or tap Cancel and choose another setting.")
+            return
+        numeric_keys = {
+            "price_ad_product", "price_ad_members", "price_ad_views",
+            "referral_points", "buy_usdt_rate", "buy_usdt_min", "buy_usdt_max",
+            "buy_usdt_stock", "buy_usdt_bep20_min", "buy_usdt_bybit_min",
+        }
+        if key in numeric_keys:
+            try:
+                number = Decimal(value)
+                if not number.is_finite() or number < 0:
+                    raise ValueError()
+                if key in {"buy_usdt_rate", "buy_usdt_min"} and number == 0:
+                    raise ValueError()
+                if key == "buy_usdt_max" and number < Decimal(str(setting_value("buy_usdt_min", "1"))):
+                    raise ValueError()
+                if key == "referral_points" and number != number.to_integral_value():
+                    raise ValueError()
+            except (ValueError, InvalidOperation):
+                await message.reply_text(
+                    "That number is invalid. Enter a number greater than or equal to 0. "
+                    "Buy rate and minimum order must be greater than 0; referral points must be a whole number. Try again."
+                )
+                return
+        if key == "min_withdraw_points":
+            try:
+                if int(value) < 1:
+                    raise ValueError()
+            except ValueError:
+                await message.reply_text("Minimum withdrawal points must be a positive whole number. Try again.")
+                return
+        if key == "buy_usdt_max":
+            try:
+                if Decimal(value) < Decimal(str(setting_value("buy_usdt_min", "1"))):
+                    await message.reply_text("Maximum order cannot be lower than the current minimum order. Try again.")
+                    return
+            except InvalidOperation:
+                await message.reply_text("Enter a valid maximum amount. Try again.")
+                return
+        if key == "buy_usdt_processing_time" and not value.strip():
+            await message.reply_text("Please enter a short processing-time message.")
+            return
+        with db() as c:
+            c.execute(
+                "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value.strip())
+            )
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        group = (
+            "ads" if key.startswith("price_ad_") else
+            "rewards" if key in {"min_withdraw_points", "referral_points"} else
+            "buyusdt"
+        )
+        await message.reply_text(
+            f"✅ Saved successfully.\\n{key} = {value.strip()}\\n\\nWhat would you like to do next?",
+            reply_markup=kb([
+                [("✏️ Change another setting in this service", f"admin_setgroup_{group}")],
+                [("⚙️ Other service groups","admin_settings")],
+                [("🛡 Admin Dashboard","admin")]
+            ])
+        )
         return
     if await handle_crypto_text(update, context, action, data, value):
         return
