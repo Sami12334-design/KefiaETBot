@@ -1005,8 +1005,46 @@ def digital_product(product_id):
 
 
 def digital_gateways():
+    """Return Gemini-specific gateways, falling back to shared configured payment methods."""
     with db() as c:
-        return c.execute("SELECT * FROM digital_payment_gateways WHERE enabled=1 ORDER BY name COLLATE NOCASE").fetchall()
+        configured = c.execute(
+            "SELECT * FROM digital_payment_gateways WHERE enabled=1 ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+    if configured:
+        return configured
+
+    # The bot also has shared Telebirr/CBE settings used by other purchase flows.
+    # Reuse only methods that are explicitly enabled and have payment details.
+    fallback = []
+    try:
+        for slug, label in enabled_buy_methods():
+            gateway = buy_usdt_gateway(slug)
+            fallback.append({
+                "id": slug,
+                "name": gateway.get("name") or label,
+                "account_number": gateway.get("number") or gateway.get("details") or "",
+                "account_name": gateway.get("account_name") or "",
+                "instructions": gateway.get("details") or gateway.get("receipt_amharic") or gateway.get("after_payment") or "",
+                "warning": gateway.get("warning") or "",
+                "enabled": 1,
+            })
+    except Exception:
+        log.exception("Could not load shared payment methods for Gemini Pro")
+    return fallback
+
+
+def digital_gateway(gateway_id):
+    """Look up an enabled Gemini gateway, or an enabled shared payment method."""
+    with db() as c:
+        gateway = c.execute(
+            "SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (gateway_id,)
+        ).fetchone()
+    if gateway:
+        return gateway
+    for item in digital_gateways():
+        if item["id"] == gateway_id:
+            return item
+    return None
 
 
 def render_digital_template(template, values):
@@ -1099,8 +1137,7 @@ async def digital_callback(update, context, action):
             return
         product_id, gateway_id = parts
         product = digital_product(product_id)
-        with db() as c:
-            gateway = c.execute("SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (gateway_id,)).fetchone()
+        gateway = digital_gateway(gateway_id)
         if not product or not gateway or int(product["stock"]) <= 0:
             await q.edit_message_text(digital_template("digital_no_stock_message", "Product or payment option unavailable."),
                                       reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")]]))
