@@ -1606,6 +1606,39 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Registered referrals: {invited}\n\nReferral points are only added when an active reward campaign is configured and the referral is verified.",
             reply_markup=kb([[("⬅️ Dashboard","home")]])
         )
+    elif action.startswith("withdraw_method_"):
+        method_slug = action.removeprefix("withdraw_method_")
+        method = {"telebirr": "Telebirr", "cbe": "CBE"}.get(method_slug)
+        if not method:
+            await q.edit_message_text("Invalid withdrawal method. Please try again.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
+        with db() as c:
+            u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
+            minimum = c.execute("SELECT value FROM settings WHERE key='min_withdraw_points'").fetchone()
+            pending = c.execute("SELECT 1 FROM withdrawals WHERE user_id=? AND status='pending' LIMIT 1", (uid,)).fetchone()
+            points_now = int(u["points"]) if u else 0
+            min_now = int(minimum["value"]) if minimum else 1000
+            if pending:
+                await q.edit_message_text("⏳ You already have a pending withdrawal. Please wait for admin review.", reply_markup=kb([[("👛 My Wallet","wallet")]])); return
+            if points_now < min_now:
+                await q.edit_message_text(f"💸 Your points are now below the withdrawal minimum.\nPoints: {points_now}\nMinimum: {min_now}", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
+            c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?, 'withdraw_account_number', ?) ON CONFLICT(user_id) DO UPDATE SET action='withdraw_account_number',data=excluded.data",
+                      (uid, json.dumps({"method": method})))
+        await q.edit_message_text(f"✅ Payout method: {method}\n\nNow enter your {('Telebirr phone number' if method == 'Telebirr' else 'CBE account number')}:",
+                                  reply_markup=kb([[("❌ Cancel","home")]]))
+    elif action.startswith("withdraw_delivery_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: withdrawal_id = int(action.removeprefix("withdraw_delivery_"))
+        except ValueError:
+            await q.edit_message_text("Invalid withdrawal request."); return
+        with db() as c:
+            wd = c.execute("SELECT user_id,status FROM withdrawals WHERE id=?", (withdrawal_id,)).fetchone()
+            if not wd or wd["status"] not in ("pending", "approved"):
+                await q.edit_message_text("This withdrawal is not available for delivery."); return
+            c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?, 'withdraw_delivery', ?) ON CONFLICT(user_id) DO UPDATE SET action='withdraw_delivery',data=excluded.data",
+                      (uid, json.dumps({"withdrawal_id": withdrawal_id, "target_user_id": wd["user_id"]})))
+        await q.edit_message_text(f"📨 Send the payout message for withdrawal #{withdrawal_id} as text, or send a photo/document with an optional caption. It will be delivered to the user.",
+                                  reply_markup=kb([[("⬅️ Admin Dashboard","admin")]]))
     elif action == "wallet":
         with db() as c:
             u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
@@ -1640,8 +1673,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await notify_admins(context, f"💸 PROMOTER WITHDRAWAL #{withdrawal_id}\nUser: {uid}\nPoints: {points}\nMethod: {promoter['method']}\nAccount: {promoter['account_number']}\nAccount holder: {promoter['account_name']}\nTarget: {promoter['completed_count']}/{promoter['target_count']}")
             return
         with db() as c:
-            c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'withdraw','') ON CONFLICT(user_id) DO UPDATE SET action='withdraw',data=''", (uid,))
-        await q.edit_message_text("Enter withdrawal method and details in one message (example: Telebirr, account/phone). Your request will be reviewed by an admin.", reply_markup=kb([[("Cancel","home")]]))
+            pending = c.execute("SELECT 1 FROM withdrawals WHERE user_id=? AND status='pending' LIMIT 1", (uid,)).fetchone()
+            if pending:
+                await q.edit_message_text("⏳ You already have a pending withdrawal request. Please wait for an admin to review it.", reply_markup=kb([[("👛 My Wallet","wallet")],[("⬅️ Dashboard","home")]]))
+                return
+            c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?, 'withdraw_choose_method','{}') ON CONFLICT(user_id) DO UPDATE SET action='withdraw_choose_method',data='{}'", (uid,))
+        await q.edit_message_text(
+            f"💸 WITHDRAW POINTS\n\nAvailable points: {points}\nMinimum: {minimum_points}\n\nChoose where you want to receive your payout:",
+            reply_markup=kb([[("📱 Telebirr","withdraw_method_telebirr"),("🏦 CBE","withdraw_method_cbe")],[("❌ Cancel","home")]])
+        )
     elif action == "ads":
         with db() as c:
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
@@ -2385,7 +2425,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             mks = c.execute("SELECT id,user_id,action,asset_type,status FROM market_listings WHERE status='pending' ORDER BY id LIMIT 8").fetchall()
         rows = []
         for x in ads: rows.append([(f"Approve ad #{x['id']} · user {x['user_id']}",f"approve_ad_{x['id']}"),( "Reject",f"reject_ad_{x['id']}")])
-        for x in wds: rows.append([(f"Approve withdrawal #{x['id']} · {x['points']} pts",f"approve_wd_{x['id']}"),("Reject",f"reject_wd_{x['id']}")])
+        for x in wds:
+            rows.append([(f"Approve withdrawal #{x['id']} · {x['points']} pts",f"approve_wd_{x['id']}"),("Reject",f"reject_wd_{x['id']}")])
+            rows.append([("📨 Send payout message / proof",f"withdraw_delivery_{x['id']}")])
         for x in mks: rows.append([(f"Approve listing #{x['id']} · {x['asset_type']}",f"approve_mk_{x['id']}"),("Reject",f"reject_mk_{x['id']}")])
         rows.append([("⬅️ Admin Dashboard","admin")])
         await q.edit_message_text("📥 Pending requests. Approval updates status; confirm any real payment manually before marking it paid.", reply_markup=kb(rows))
@@ -2589,6 +2631,34 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     with db() as c:
         pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+
+    if pending and pending["action"] == "withdraw_delivery":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(pending["data"])
+        withdrawal_id = int(state.get("withdrawal_id", 0))
+        target_uid = int(state.get("target_user_id", 0))
+        with db() as c:
+            wd = c.execute("SELECT status FROM withdrawals WHERE id=? AND user_id=?", (withdrawal_id, target_uid)).fetchone()
+        if not wd or wd["status"] not in ("pending", "approved"):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("This withdrawal is no longer awaiting delivery."); return
+        caption = f"💸 Payout update for withdrawal #{withdrawal_id}"
+        try:
+            if message.photo:
+                await context.bot.send_photo(target_uid, message.photo[-1].file_id, caption=caption + (f"\n{message.caption}" if message.caption else ""))
+            elif message.document:
+                await context.bot.send_document(target_uid, message.document.file_id, caption=caption + (f"\n{message.caption}" if message.caption else ""))
+            else:
+                await message.reply_text("Please send a photo or document, optionally with a caption."); return
+        except Exception:
+            log.exception("Could not deliver payout proof for withdrawal %s", withdrawal_id)
+            await message.reply_text("Could not deliver the file to the user. The request remains open."); return
+        with db() as c:
+            c.execute("UPDATE withdrawals SET status='approved' WHERE id=? AND status='pending'", (withdrawal_id,))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Payout proof delivered to user for withdrawal #{withdrawal_id}.")
+        return
 
     if pending and pending["action"] == "crypto_delivery":
         await deliver_crypto_media(update, context, pending)
@@ -3500,19 +3570,90 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       (parts[0],str(chat.id),target,points,participant_limit,user.id,now()))
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
         await update.effective_message.reply_text("✅ Task created. It now appears in Daily Tasks.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")],[("🛡 Admin Dashboard","admin")]]))
+    elif action == "withdraw_delivery":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        withdrawal_id = int(state.get("withdrawal_id", 0))
+        target_uid = int(state.get("target_user_id", 0))
+        with db() as c:
+            wd = c.execute("SELECT status FROM withdrawals WHERE id=? AND user_id=?", (withdrawal_id, target_uid)).fetchone()
+        if not wd or wd["status"] not in ("pending", "approved"):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("This withdrawal is no longer awaiting delivery."); return
+        try:
+            await context.bot.send_message(target_uid, f"💸 Update for withdrawal #{withdrawal_id}:\n\n{value}")
+        except Exception:
+            await message.reply_text("Could not deliver the message to the user. The request remains open."); return
+        with db() as c:
+            c.execute("UPDATE withdrawals SET status='approved' WHERE id=? AND status='pending'", (withdrawal_id,))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Message delivered to user for withdrawal #{withdrawal_id}.")
+        return
+    elif action == "withdraw_account_number":
+        state = decode_pending(data)
+        method = state.get("method")
+        if method not in {"Telebirr", "CBE"}:
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("Your withdrawal session expired. Please tap Withdraw Points again."); return
+        if not (5 <= len(value) <= 40):
+            await message.reply_text("Enter a valid Telebirr phone number or CBE account number (5–40 characters)."); return
+        state["account_number"] = value
+        set_pending(user.id, "withdraw_account_name", state)
+        await message.reply_text("Enter the account holder's full name exactly as registered with Telebirr/CBE:", reply_markup=kb([[("❌ Cancel","home")]]))
+        return
+    elif action == "withdraw_account_name":
+        state = decode_pending(data)
+        method = state.get("method")
+        account_number = str(state.get("account_number", "")).strip()
+        if method not in {"Telebirr", "CBE"} or not account_number:
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("Your withdrawal session expired. Please start again."); return
+        if not (2 <= len(value) <= 100):
+            await message.reply_text("Enter the account holder's name (2–100 characters)."); return
+        with db() as c:
+            u = c.execute("SELECT points FROM users WHERE user_id=?", (user.id,)).fetchone()
+            minimum = c.execute("SELECT value FROM settings WHERE key='min_withdraw_points'").fetchone()
+            minp = int(minimum["value"]) if minimum else 1000
+            pending = c.execute("SELECT 1 FROM withdrawals WHERE user_id=? AND status='pending' LIMIT 1", (user.id,)).fetchone()
+            if not u or int(u["points"]) < minp:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text(f"Your available points are below the withdrawal minimum ({minp})."); return
+            if pending:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text("You already have a pending withdrawal request. Please wait for admin review."); return
+            payout_details = f"Account number: {account_number} | Account holder: {value}"
+            cur = c.execute("INSERT INTO withdrawals(user_id,points,payout_method,payout_details,created_at) VALUES(?,?,?,?,?)",
+                            (user.id, int(u["points"]), method, payout_details, now()))
+            withdrawal_id = cur.lastrowid
+            points_requested = int(u["points"])
+            c.execute("UPDATE users SET points=0 WHERE user_id=? AND points>=?", (user.id, points_requested))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Withdrawal request #{withdrawal_id} submitted!\nPoints: {points_requested}\nMethod: {method}\nAccount: {account_number}\nAccount holder: {value}\n\nAdmins will review your request. Your points are reserved until approval or rejection.")
+        for aid in ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    aid,
+                    f"💸 WITHDRAWAL REQUEST #{withdrawal_id}\nUser: {user.id} (@{user.username or 'no_username'})\nPoints: {points_requested}\nMethod: {method}\nAccount: {account_number}\nAccount holder: {value}",
+                    reply_markup=kb([[("📨 Send payout message / proof",f"withdraw_delivery_{withdrawal_id}")],[("📥 Review queue","admin_queue")]])
+                )
+            except Exception:
+                log.warning("Could not notify admin %s about withdrawal %s", aid, withdrawal_id)
+        return
     elif action == "withdraw":
+        # Compatibility for older sessions using the previous free-form withdrawal prompt.
         with db() as c:
             u = c.execute("SELECT points FROM users WHERE user_id=?", (user.id,)).fetchone()
             minimum = c.execute("SELECT value FROM settings WHERE key='min_withdraw_points'").fetchone()
             minp = int(minimum["value"]) if minimum else 1000
             if not u or u["points"] < minp:
                 c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-                await update.effective_message.reply_text("Your points are below the withdrawal minimum."); return
+                await message.reply_text("Your points are below the withdrawal minimum."); return
             c.execute("INSERT INTO withdrawals(user_id,points,payout_method,payout_details,created_at) VALUES(?,?,?,?,?)",
                       (user.id,u["points"],"user-provided",value,now()))
             c.execute("UPDATE users SET points=0 WHERE user_id=?", (user.id,))
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await update.effective_message.reply_text("✅ Withdrawal request submitted for admin review. Points are reserved until the request is approved or rejected.")
+        await message.reply_text("✅ Withdrawal request submitted for admin review. Points are reserved until the request is approved or rejected.")
         await notify_admins(context, f"💸 New withdrawal request from {user.id}. Review in Admin Dashboard.")
     elif action == "ad_receipt":
         request_id = int(data)
@@ -3643,6 +3784,12 @@ async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
 
             c.execute("UPDATE tasks SET completed_count=completed_count+1 WHERE id=?", (task["id"],))
+            # Ensure the task owner has a wallet row before crediting the verified reward.
+            # Without this, UPDATE silently affects zero rows while the success message still sends.
+            c.execute(
+                "INSERT OR IGNORE INTO users(user_id,username,first_name,joined_at) VALUES(?,?,?,?)",
+                (mapping["owner_user_id"], "", "", now())
+            )
             c.execute("UPDATE users SET points=points+? WHERE user_id=?",
                       (task["points"], mapping["owner_user_id"]))
             new_count = task["completed_count"] + 1
