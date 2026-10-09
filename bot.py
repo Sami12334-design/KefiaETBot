@@ -189,7 +189,7 @@ def migrate_legacy_sqlite(c):
     if not os.path.isfile(DB_PATH) or os.path.getsize(DB_PATH) == 0:
         raise RuntimeError(
             "Legacy SQLite database not found at %s; refusing to start an empty PostgreSQL database. "
-            "Restore the old SQLite file or explicitly confirm a fresh start before deploying."
+            "Restore the old SQLite file or a backup before allowing the bot to start."
             % DB_PATH
         )
     source = None
