@@ -137,9 +137,10 @@ def _translate_sql(sql):
         return "SELECT 1"
     info = re.match(r"^PRAGMA\s+table_info\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*;?$", statement, re.I)
     if info:
+        table_name = info.group(1).lower()
         return (
             "SELECT column_name AS name FROM information_schema.columns "
-            "WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position"
+            f"WHERE table_schema = 'public' AND table_name = '{table_name}' ORDER BY ordinal_position"
         )
     statement = re.sub(r"\bCOLLATE\s+NOCASE\b", "", statement, flags=re.I)
     ignored_insert = re.match(r"^INSERT\s+OR\s+IGNORE\s+INTO\b", statement, re.I)
