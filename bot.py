@@ -1,4 +1,5 @@
 import os
+import asyncio
 import sqlite3
 import logging
 from datetime import datetime, timezone
@@ -16,7 +17,21 @@ from telegram.ext import (
 # KefiaETBot MVP: task rewards, invite tracking, ad requests, marketplace,
 # wallet/withdrawal requests, and admin review. Prices and payouts are admin-configured.
 TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_IDS = {int(x.strip()) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip().isdigit()}
+def parse_admin_ids(value):
+    """Parse comma- or semicolon-separated Telegram user IDs safely."""
+    admin_ids = set()
+    for item in value.replace(";", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            admin_ids.add(int(item))
+        except ValueError:
+            logging.warning("Ignoring invalid ADMIN_IDS entry: %r", item)
+    return admin_ids
+
+
+ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", ""))
 DB_PATH = os.getenv("DATABASE_PATH", "kefiaetbot.db")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("KefiaETBot")
@@ -593,7 +608,19 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
     log.info("KefiaETBot starting")
-    app.run_polling(allowed_updates=["message","callback_query","chat_member"])
+    # Python 3.14 no longer implicitly creates a current event loop here.
+    # Set one explicitly for python-telegram-bot's run_polling lifecycle.
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        app.run_polling(
+            allowed_updates=["message", "callback_query", "chat_member"],
+            close_loop=False,
+        )
+    finally:
+        if not loop.is_closed():
+            loop.close()
+        asyncio.set_event_loop(None)
 
 
 if __name__ == "__main__":
