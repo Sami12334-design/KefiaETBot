@@ -1148,11 +1148,10 @@ async def digital_callback(update, context, action):
         message_settings = [
             ("🛍 Product details shown to customers", "digital_product_details_template"),
             ("💳 Payment instructions shown to customers", "digital_payment_template"),
-            ("⏳ Receipt waiting message", "digital_waiting_message"),
+            ("⏳ Receipt received / waiting for review", "digital_waiting_message"),
             ("🚫 Out-of-stock message", "digital_no_stock_message"),
             ("⚠️ No-payment-method message", "digital_no_gateway_message"),
             ("❌ Purchase-cancelled message", "digital_cancel_message"),
-            ("✅ Receipt-submitted message", "digital_order_submitted_message"),
             ("🛒 Buy button label", "digital_buy_button"),
             ("❌ Cancel button label", "digital_cancel_button"),
             ("⬅️ Marketplace button label", "digital_market_button"),
@@ -1174,7 +1173,7 @@ async def digital_callback(update, context, action):
         allowed = {
             "digital_product_details_template", "digital_payment_template", "digital_waiting_message",
             "digital_no_stock_message", "digital_no_gateway_message", "digital_cancel_message",
-            "digital_order_submitted_message", "digital_buy_button", "digital_cancel_button",
+            "digital_buy_button", "digital_cancel_button",
             "digital_market_button", "digital_choose_gateway_prompt"
         }
         if key not in allowed:
@@ -1561,7 +1560,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("➕ Create join task","admin_new_task"),("📊 Statistics","admin_stats")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
-            [("🌟 Digital Products / Orders","admin_digital_products")],
+            [("🌟 Gemini Pro & Products","admin_digital_products")],
             [("⬅️ Dashboard","home")]
         ]))
     elif action == "admin_new_task":
@@ -1801,7 +1800,7 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             order_id = cur.lastrowid
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await message.reply_text(digital_template("digital_order_submitted_message", digital_template("digital_waiting_message", "Receipt received; waiting for admin review.")))
+        await message.reply_text(digital_template("digital_waiting_message", "Receipt received; waiting for admin review."))
         caption = (
             f"🌟 DIGITAL ORDER #{order_id}\nUser ID: {user.id}\nProduct: {order_product_name} "
             f"{order_duration}m\nPrice: {order_price:g} ETB\nGateway: {order_gateway_name}\n"
@@ -2365,7 +2364,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             allowed = {
                 "digital_product_details_template", "digital_payment_template", "digital_waiting_message",
                 "digital_no_stock_message", "digital_no_gateway_message", "digital_cancel_message",
-                "digital_order_submitted_message", "digital_buy_button", "digital_cancel_button",
+                "digital_buy_button", "digital_cancel_button",
                 "digital_market_button", "digital_choose_gateway_prompt", "digital_market_title",
                 "digital_market_product_button_template", "digital_receipt_upload_prompt"
             }
