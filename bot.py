@@ -1330,12 +1330,20 @@ def digital_product(product_id):
         return c.execute("SELECT * FROM digital_products WHERE id=?", (product_id,)).fetchone()
 
 
+def _digital_gateway_is_enabled(value):
+    """Normalize enabled flags from SQLite and PostgreSQL rows."""
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def digital_gateways():
-    """Return Gemini-specific gateways, falling back to shared configured payment methods."""
+    """Return enabled Gemini gateways, falling back to shared configured payment methods."""
+    # Read rows first and normalize the enabled flag in Python. This avoids a
+    # backend/type mismatch making an enabled gateway disappear from checkout.
     with db() as c:
-        configured = c.execute(
-            "SELECT * FROM digital_payment_gateways WHERE enabled=1 ORDER BY name COLLATE NOCASE"
+        configured_rows = c.execute(
+            "SELECT * FROM digital_payment_gateways ORDER BY name COLLATE NOCASE"
         ).fetchall()
+    configured = [row for row in configured_rows if _digital_gateway_is_enabled(row["enabled"])]
     if configured:
         return configured
 
@@ -1363,9 +1371,9 @@ def digital_gateway(gateway_id):
     """Look up an enabled Gemini gateway, or an enabled shared payment method."""
     with db() as c:
         gateway = c.execute(
-            "SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (gateway_id,)
+            "SELECT * FROM digital_payment_gateways WHERE id=?", (gateway_id,)
         ).fetchone()
-    if gateway:
+    if gateway and _digital_gateway_is_enabled(gateway["enabled"]):
         return gateway
     for item in digital_gateways():
         if item["id"] == gateway_id:
