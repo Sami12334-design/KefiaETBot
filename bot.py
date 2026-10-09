@@ -471,11 +471,10 @@ async def crypto_callback(update, context, action):
                     (uid, now(), order_id),
                 )
                 changed = cur.rowcount == 1
-                if changed:
-                    set_pending(uid, "crypto_delivery", {"order_id": order_id})
         if not order or not changed:
             await q.edit_message_text("This order was already handled or could not be found.")
             return
+        set_pending(uid, "crypto_delivery", {"order_id": order_id})
         side_text = "USDT delivery" if order["side"] == "buy" else "ETB payout"
         try:
             await context.bot.send_message(
@@ -943,9 +942,11 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     with db() as c:
         pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+
     if pending and pending["action"] == "crypto_delivery":
         await deliver_crypto_media(update, context, pending)
         return
+
     if pending and pending["action"] in ("buy_receipt", "sell_receipt"):
         state = decode_pending(pending["data"])
         order_id = int(state.get("order_id", 0))
@@ -957,19 +958,28 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("Please upload a screenshot as a photo or document.")
             return
         with db() as c:
-            order = c.execute("SELECT * FROM crypto_orders WHERE id=? AND user_id=? AND status='awaiting_payment_proof'", (order_id, user.id)).fetchone()
+            order = c.execute(
+                "SELECT * FROM crypto_orders WHERE id=? AND user_id=? AND status='awaiting_payment_proof'",
+                (order_id, user.id),
+            ).fetchone()
             if not order:
                 c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
                 await message.reply_text("This order is no longer waiting for payment proof.")
                 return
-            c.execute("UPDATE crypto_orders SET receipt=?,status='pending_admin_approval',updated_at=? WHERE id=? AND user_id=?",
-                      (receipt, now(), order_id, user.id))
+            c.execute(
+                "UPDATE crypto_orders SET receipt=?,status='pending_admin_approval',updated_at=? "
+                "WHERE id=? AND user_id=?",
+                (receipt, now(), order_id, user.id),
+            )
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await message.reply_text(f"✅ Screenshot received for order #{order_id}. Admin will verify the actual transfer before completing your order.")
-        side_prefix = "buyorder" if order["side"] == "buy" else "sellorder"
-        caption = (f"🪙 {order['side'].upper()} USDT order #{order_id}\nUser: {user.id}\n"
-                   f"Amount: {order['amount_usdt']:g} USDT\nETB total: {order['total_etb']:g}\n"
-                   f"Status: pending admin approval. Verify the real transaction independently.")
+        await message.reply_text(
+            f"✅ Screenshot received for order #{order_id}. Admin will verify the actual transfer before completing your order."
+        )
+        caption = (
+            f"🪙 {order['side'].upper()} USDT order #{order_id}\nUser: {user.id}\n"
+            f"Amount: {order['amount_usdt']:g} USDT\nETB total: {order['total_etb']:g}\n"
+            "Status: pending admin approval. Verify the real transaction independently."
+        )
         for aid in ADMIN_IDS:
             try:
                 markup = kb([[("🔎 Review order", f"crypto_order_view_{order_id}")]])
@@ -980,20 +990,34 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception:
                 log.warning("Could not forward crypto order %s proof to admin %s", order_id, aid)
         return
+
     if not pending or pending["action"] != "ad_receipt":
         return
-    request_id = int(pending["data"])
-        owned = c.execute("SELECT id FROM ad_requests WHERE id=? AND user_id=? AND status='quoted'", (request_id, user.id)).fetchone()
+    try:
+        request_id = int(pending["data"])
+    except (TypeError, ValueError):
+        await message.reply_text("That ad receipt request is invalid. Please start again.")
+        return
+    with db() as c:
+        owned = c.execute(
+            "SELECT id FROM ad_requests WHERE id=? AND user_id=? AND status='quoted'",
+            (request_id, user.id),
+        ).fetchone()
         if not owned:
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-            await message.reply_text("That ad request is no longer waiting for payment proof."); return
+            await message.reply_text("That ad request is no longer waiting for payment proof.")
+            return
         if message.photo:
             receipt = "photo:" + message.photo[-1].file_id
         elif message.document:
             receipt = "document:" + message.document.file_id
         else:
-            await message.reply_text("Please send a photo or document as payment proof."); return
-        c.execute("UPDATE ad_requests SET receipt=?,status='receipt_submitted' WHERE id=? AND user_id=?", (receipt, request_id, user.id))
+            await message.reply_text("Please send a photo or document as payment proof.")
+            return
+        c.execute(
+            "UPDATE ad_requests SET receipt=?,status='receipt_submitted' WHERE id=? AND user_id=?",
+            (receipt, request_id, user.id),
+        )
         c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
     await message.reply_text("✅ Payment proof submitted. An admin will verify it manually before confirming the ad.")
     caption = f"🧾 Payment proof for ad request #{request_id} from user {user.id}. Verify payment independently before approval."
@@ -1005,7 +1029,11 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
                 await context.bot.send_document(aid, document=message.document.file_id, caption=caption)
         except Exception:
             log.warning("Could not forward receipt for ad request %s to admin %s", request_id, aid)
-    await notify_admins(context, f"🧾 Payment proof submitted for ad request #{request_id} by user {user.id}. Review it in the Admin Dashboard; verify payment independently.")
+    await notify_admins(
+        context,
+        f"🧾 Payment proof submitted for ad request #{request_id} by user {user.id}. "
+        "Review it in the Admin Dashboard; verify payment independently.",
+    )
 
 
 async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
