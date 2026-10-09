@@ -704,11 +704,13 @@ async def crypto_callback(update, context, action):
             return
         order_id = int(action.rsplit("_", 1)[-1])
         with db() as c:
-            order = c.execute("SELECT user_id,status FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
+            order = c.execute("SELECT user_id,status,side,amount_usdt FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
             changed = False
             if order and order["status"] == "pending_admin_approval":
                 cur = c.execute("UPDATE crypto_orders SET status='rejected',admin_id=?,updated_at=? WHERE id=? AND status='pending_admin_approval'", (uid, now(), order_id))
                 changed = cur.rowcount == 1
+                if changed and order["side"] == "buy":
+                    c.execute("UPDATE settings SET value=CAST(value AS REAL)+? WHERE key='buy_usdt_stock'", (str(order["amount_usdt"]),))
         if changed:
             try:
                 await context.bot.send_message(order["user_id"], f"❌ Your crypto order #{order_id} was rejected by an admin. Please contact support if you need help.")
