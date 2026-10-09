@@ -1207,8 +1207,28 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await crypto_callback(update, context, action)
         return
     if action == "home":
-        # Dashboard acts as Cancel for any unfinished text-input flow.
+        # Dashboard acts as Cancel for unfinished flows. Release Buy USDT stock reservations if payment was not submitted.
         with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+            if pending and pending["action"] == "buy_receipt":
+                pending_state = decode_pending(pending["data"])
+                try:
+                    pending_order_id = int(pending_state.get("order_id", 0))
+                except (TypeError, ValueError):
+                    pending_order_id = 0
+                pending_order = c.execute(
+                    "SELECT amount_usdt,status FROM crypto_orders WHERE id=? AND user_id=? AND side='buy'",
+                    (pending_order_id, uid)
+                ).fetchone()
+                if pending_order and pending_order["status"] == "awaiting_payment_proof":
+                    c.execute(
+                        "UPDATE crypto_orders SET status='cancelled',updated_at=? WHERE id=? AND status='awaiting_payment_proof'",
+                        (now(), pending_order_id)
+                    )
+                    c.execute(
+                        "UPDATE settings SET value=CAST(value AS REAL)+? WHERE key='buy_usdt_stock'",
+                        (str(pending_order["amount_usdt"]),)
+                    )
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
         await q.edit_message_text("🏠 Main Dashboard", reply_markup=home_keyboard(is_admin(uid)))
     elif action == "jobs":
