@@ -166,6 +166,7 @@ def init_db():
             ("digital_waiting_message", "✅ Your receipt has been received. Please wait while the admin verifies your payment. You will receive your activation link shortly."),
             ("digital_no_stock_message", "This product is currently out of stock. Please check back later."),
             ("digital_no_gateway_message", "Payment is temporarily unavailable for this product. Please contact an admin."),
+            ("digital_invalid_payment_message", "That payment option is no longer available. Please return to the marketplace and choose again."),
             ("digital_cancel_message", "Your purchase was cancelled."),
             ("digital_order_submitted_message", "✅ Your receipt has been submitted! Your order is now under review. We’ll message you after the admin checks it."),
             ("digital_buy_button", "🌟 Buy now"),
@@ -1059,7 +1060,7 @@ async def digital_callback(update, context, action):
     if action.startswith("digital_gateway_"):
         parts = action[len("digital_gateway_"):].split("::", 1)
         if len(parts) != 2:
-            await q.edit_message_text("Invalid payment option.")
+            await q.edit_message_text(digital_template("digital_invalid_payment_message", "That payment option is no longer available. Please return to the marketplace and choose again."), reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")]]))
             return
         product_id, gateway_id = parts
         product = digital_product(product_id)
@@ -1156,6 +1157,7 @@ async def digital_callback(update, context, action):
             ("⏳ Receipt received / waiting for review", "digital_waiting_message"),
             ("🚫 Out-of-stock message", "digital_no_stock_message"),
             ("⚠️ No-payment-method message", "digital_no_gateway_message"),
+            ("⚠️ Invalid payment option message", "digital_invalid_payment_message"),
             ("❌ Purchase-cancelled message", "digital_cancel_message"),
             ("🛒 Buy button label", "digital_buy_button"),
             ("❌ Cancel button label", "digital_cancel_button"),
@@ -1180,7 +1182,7 @@ async def digital_callback(update, context, action):
         key = action[len("digital_admin_message_"):]
         allowed = {
             "digital_product_details_template", "digital_payment_template", "digital_waiting_message",
-            "digital_no_stock_message", "digital_no_gateway_message", "digital_cancel_message",
+            "digital_no_stock_message", "digital_no_gateway_message", "digital_invalid_payment_message", "digital_cancel_message",
             "digital_buy_button", "digital_cancel_button",
             "digital_market_button", "digital_choose_gateway_prompt", "digital_market_title",
             "digital_market_product_button_template", "digital_receipt_upload_prompt"
