@@ -541,6 +541,23 @@ def setting_value(key, default=None):
         row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
 
+def default_task_message_template():
+    """Customer-facing task message. The personal invite link marker is mandatory and system-filled."""
+    return (
+        "🧩 DAILY TASK · {title}\n"
+        "━━━━━━━━━━━━━━━━━━\n"
+        "🎁 Reward: {points} points per verified join\n"
+        "📣 Channel: {channel}\n"
+        "📈 Campaign progress: {completed_count}/{target} joins\n"
+        "👥 Task participants: {participants}\n"
+        "🧭 Your status: {status}\n\n"
+        "🔗 YOUR PERSONAL INVITE LINK\n"
+        "{{PERSONAL_INVITE_LINK}}\n\n"
+        "Share this link with real people. Your link is created automatically for you. "
+        "Only new, unique joins verified by Telegram count toward your reward. "
+        "Self-joins, duplicate accounts and fake members do not count."
+    )
+
 
 def required_channel_config():
     """Database settings override Render environment defaults."""
@@ -1929,19 +1946,20 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             current = c.execute("SELECT COUNT(*) n FROM task_claims WHERE task_id=?", (tid,)).fetchone()["n"]
         slots = "Unlimited" if participant_limit == 0 else f"{current}/{participant_limit} users assigned"
-        msg = (
-            f"🧩 DAILY TASK · {t['title']}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🎁 Reward: {t['points']} points per verified join\n"
-            f"📣 Channel: {t['channel']}\n"
-            f"📈 Campaign progress: {t['completed_count']}/{t['target']} joins\n"
-            f"👥 Task participants: {slots}\n"
-            f"🧭 Your status: {status}\n\n"
-            f"🔗 YOUR PERSONAL INVITE LINK\n{invite if invite else 'Not assigned'}\n\n"
-            "Share this link with real people. Your link is created automatically for you. "
-            "Only new, unique joins verified by Telegram count toward your reward. "
-            "Self-joins, duplicate accounts and fake members do not count."
-        )
+        template = setting_value(f"task_message_template_{tid}", default_task_message_template())
+        replacements = {
+            "{title}": str(t["title"]),
+            "{points}": str(t["points"]),
+            "{channel}": str(t["channel"]),
+            "{completed_count}": str(t["completed_count"]),
+            "{target}": str(t["target"]),
+            "{participants}": str(slots),
+            "{status}": str(status),
+            "{{PERSONAL_INVITE_LINK}}": str(invite if invite else "Not assigned"),
+        }
+        for token, replacement in replacements.items():
+            template = template.replace(token, replacement)
+        msg = template
         await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress",f"task_{tid}")],[("🧩 More tasks","jobs"),("🏠 Dashboard","home")]]))
     elif action == "invite":
         bot = await context.bot.get_me()
@@ -2330,11 +2348,50 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("✏️ Edit title","admintask_edit_title_" + str(tid)),("📣 Edit channel","admintask_edit_channel_" + str(tid))],
             [("🎯 Edit target","admintask_edit_target_" + str(tid)),("💰 Edit reward","admintask_edit_points_" + str(tid))],
             [("👥 Edit user limit","admintask_edit_limit_" + str(tid))],
+            [("✍️ Edit customer message","admintask_message_edit_" + str(tid)),("♻️ Reset message","admintask_message_reset_" + str(tid))],
             [("🏆 Task leaderboard","admintask_leaderboard_" + str(tid))],
             [("⏸ Pause / Resume","admintask_toggle_" + str(tid)),("🗑 Remove","admintask_delete_confirm_" + str(tid))],
             [("⬅️ All tasks","admin_tasks")]
         ]
         await q.edit_message_text(body, reply_markup=kb(rows))
+    elif action.startswith("admintask_message_edit_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            tid = int(action.rsplit("_", 1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            task = c.execute("SELECT id,title FROM tasks WHERE id=?", (tid,)).fetchone()
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
+        template = setting_value(f"task_message_template_{tid}", default_task_message_template())
+        prompt = (
+            f"✍️ EDIT CUSTOMER MESSAGE · TASK #{tid} — {task['title']}\n\n"
+            "Send the complete message template you want users to see. Keep "
+            "{{PERSONAL_INVITE_LINK}} exactly once; the bot replaces it with each user's "
+            "own verified Telegram invite link, so the link itself cannot be edited.\n\n"
+            "Available placeholders:\n"
+            "{title} · {points} · {channel} · {completed_count} · {target} · {participants} · {status}\n\n"
+            "Maximum 3000 characters. Send /cancel to cancel.\n\n"
+            "CURRENT TEMPLATE:\n" + template
+        )
+        set_pending(uid, "admin_task_message_template", {"task_id":tid})
+        await q.edit_message_text(prompt, reply_markup=kb([[("Cancel","admintask_view_" + str(tid))]]))
+    elif action.startswith("admintask_message_reset_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            tid = int(action.rsplit("_", 1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            task = c.execute("SELECT id FROM tasks WHERE id=?", (tid,)).fetchone()
+            if task:
+                c.execute("DELETE FROM settings WHERE key=?", (f"task_message_template_{tid}",))
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
+        await q.edit_message_text("♻️ Customer message reset to the default template. The personal invite link remains automatically generated.", reply_markup=kb([[("📋 Review task",f"admintask_view_{tid}")],[("📋 Manage tasks","admin_tasks")]]))
     elif action.startswith("admintask_edit_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -3868,6 +3925,43 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     if await handle_crypto_text(update, context, action, data, value):
+        return
+    if action == "admin_task_message_template":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        try:
+            tid = int(state.get("task_id", 0))
+        except (TypeError, ValueError):
+            tid = 0
+        template = value.strip()
+        marker = "{{PERSONAL_INVITE_LINK}}"
+        if tid < 1:
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("That task edit expired. Open Manage Tasks and try again."); return
+        if not template or len(template) > 3000:
+            await message.reply_text("The template must contain 1–3000 characters. Please send it again."); return
+        if template.count(marker) != 1:
+            await message.reply_text(
+                "The template must contain {{PERSONAL_INVITE_LINK}} exactly once. "
+                "Keep that marker unchanged so every user receives their own personal invite link."
+            ); return
+        with db() as c:
+            task = c.execute("SELECT id FROM tasks WHERE id=?", (tid,)).fetchone()
+            if task:
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES(?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (f"task_message_template_{tid}", template)
+                )
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        if not task:
+            await message.reply_text("Task not found. No template was saved."); return
+        await message.reply_text(
+            "✅ Customer-facing task message updated. The personal invite URL remains generated automatically for each user.",
+            reply_markup=kb([[("📋 Review task",f"admintask_view_{tid}")],[("📋 Manage tasks","admin_tasks")]])
+        )
         return
     if action == "admin_task_edit":
         if not is_admin(user.id):
