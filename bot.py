@@ -2327,8 +2327,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             body += "\nNo users have claimed this task yet."
         rows = [
-            [("✏️ Edit title","admintask_edit_title_" + str(tid)),("🎯 Edit target","admintask_edit_target_" + str(tid))],
-            [("💰 Edit reward","admintask_edit_points_" + str(tid)),("👥 Edit user limit","admintask_edit_limit_" + str(tid))],
+            [("✏️ Edit title","admintask_edit_title_" + str(tid)),("📣 Edit channel","admintask_edit_channel_" + str(tid))],
+            [("🎯 Edit target","admintask_edit_target_" + str(tid)),("💰 Edit reward","admintask_edit_points_" + str(tid))],
+            [("👥 Edit user limit","admintask_edit_limit_" + str(tid))],
             [("🏆 Task leaderboard","admintask_leaderboard_" + str(tid))],
             [("⏸ Pause / Resume","admintask_toggle_" + str(tid)),("🗑 Remove","admintask_delete_confirm_" + str(tid))],
             [("⬅️ All tasks","admin_tasks")]
@@ -2343,11 +2344,12 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             field = prefix[len("admintask_edit_"):]
         except (ValueError, IndexError):
             await q.edit_message_text("Invalid task edit request."); return
-        field_labels = {"title":"task title","target":"verified-join target","points":"points per verified join","limit":"maximum number of users"}
+        field_labels = {"title":"task title","channel":"target channel username or ID","target":"verified-join target","points":"points per verified join","limit":"maximum number of users"}
         if field not in field_labels:
             await q.edit_message_text("Unknown task setting."); return
         set_pending(uid, "admin_task_edit", {"task_id":tid,"field":field})
-        await q.edit_message_text(f"Send the new {field_labels[field]}. For user limit, send 0 for unlimited.", reply_markup=kb([[("Cancel","admintask_view_" + str(tid))]]))
+        extra = " Send the channel's @username or numeric ID. The bot must be an administrator and able to create invite links." if field == "channel" else " For user limit, send 0 for unlimited." if field == "limit" else ""
+        await q.edit_message_text(f"Send the new {field_labels[field]}.{extra}", reply_markup=kb([[("Cancel","admintask_view_" + str(tid))]]))
     elif action.startswith("admintask_toggle_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -3877,15 +3879,34 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             field = str(state.get("field", ""))
         except (TypeError, ValueError):
             tid, field = 0, ""
-        allowed = {"title", "target", "points", "limit"}
+        allowed = {"title", "channel", "target", "points", "limit"}
         if tid < 1 or field not in allowed:
             with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
             await message.reply_text("That task edit expired. Open Manage Tasks and try again."); return
+        with db() as c:
+            existing_task = c.execute("SELECT id,completed_count FROM tasks WHERE id=?", (tid,)).fetchone()
+        if not existing_task:
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("Task not found."); return
         if field == "title":
             if not value or len(value) > 120:
                 await message.reply_text("Enter a task title between 1 and 120 characters."); return
             with db() as c:
-                cur = c.execute("UPDATE tasks SET title=? WHERE id=?", (value,tid))
+                c.execute("UPDATE tasks SET title=? WHERE id=?", (value.strip(),tid))
+        elif field == "channel":
+            if not value.strip():
+                await message.reply_text("Enter a channel @username or numeric channel ID."); return
+            try:
+                chat = await context.bot.get_chat(value.strip())
+                bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+                if bot_member.status not in ("administrator", "creator"):
+                    await message.reply_text("The bot must be an administrator in that channel. No changes were saved."); return
+                test_link = await context.bot.create_chat_invite_link(chat.id, member_limit=1, name=f"KefiaETBot-edit-check-{tid}")
+                await context.bot.revoke_chat_invite_link(chat.id, test_link.invite_link)
+            except Exception:
+                await message.reply_text("I couldn't access that channel or create invite links. Check the channel ID and bot permissions. No changes were saved."); return
+            with db() as c:
+                c.execute("UPDATE tasks SET channel=? WHERE id=?", (str(chat.id),tid))
         else:
             try:
                 number = int(value)
