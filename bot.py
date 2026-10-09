@@ -2209,6 +2209,63 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.effective_message
     if not user or not message:
         return
+    # Admin can send a photo/document to a marketplace buyer or seller from the listing controls.
+    with db() as c:
+        current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+    if is_admin(user.id) and current_pending and current_pending["action"] == "admin_market_message":
+        state = decode_pending(current_pending["data"])
+        target_user = int(state.get("target_user_id",0))
+        listing_id = int(state.get("listing_id",0))
+        if not target_user:
+            await message.reply_text("The message recipient was not found."); return
+        try:
+            if message.photo:
+                await context.bot.send_photo(target_user, message.photo[-1].file_id, caption=f"📩 Message from KefiaETBot admin about social account listing #{listing_id}")
+            elif message.document:
+                await context.bot.send_document(target_user, message.document.file_id, caption=f"📩 Message from KefiaETBot admin about social account listing #{listing_id}")
+            else:
+                await message.reply_text("Please send a photo or document."); return
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ Media message sent.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")]]))
+        except Exception:
+            await message.reply_text("Could not deliver the media. The user may have blocked the bot.")
+        return
+
+    # Buyer payment proof for a social account listing.
+    if current_pending and current_pending["action"] == "account_buy_receipt":
+        state = decode_pending(current_pending["data"])
+        try: listing_id = int(state.get("listing_id",0))
+        except (TypeError,ValueError): listing_id = 0
+        if message.photo:
+            receipt_file_id, receipt_type = message.photo[-1].file_id, "photo"
+        elif message.document:
+            receipt_file_id, receipt_type = message.document.file_id, "document"
+        else:
+            await message.reply_text("📸 Please upload a payment screenshot as a photo or document."); return
+        with db() as c:
+            item = c.execute("SELECT * FROM market_listings WHERE id=? AND buyer_user_id=? AND purchase_status='awaiting_payment'", (listing_id,user.id)).fetchone()
+            if not item:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text("This purchase is no longer awaiting payment proof. Please browse available listings again."); return
+            c.execute("UPDATE market_listings SET receipt_file_id=?,receipt_type=?,purchase_status='receipt_submitted' WHERE id=? AND buyer_user_id=?",
+                      (receipt_file_id,receipt_type,listing_id,user.id))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Payment screenshot submitted for account #{listing_id}. An admin will verify the payment manually before completing the purchase.")
+        caption = (f"SOCIAL ACCOUNT PURCHASE #{listing_id}\nBuyer: {user.id}\nSeller: {item['user_id']}\n"
+                   f"Platform: {item['asset_type']}\nPrice: {item['price']} ETB\nPayment: {item['payment_method']}\n"
+                   "Status: receipt submitted — verify the actual transfer before approving.")
+        for aid in ADMIN_IDS:
+            try:
+                markup = kb([[("🔎 Review purchase",f"admin_market_item_{listing_id}")]])
+                if receipt_type == "photo":
+                    await context.bot.send_photo(aid,receipt_file_id,caption=caption,reply_markup=markup)
+                else:
+                    await context.bot.send_document(aid,receipt_file_id,caption=caption,reply_markup=markup)
+            except Exception:
+                log.warning("Could not forward social account receipt %s to admin %s",listing_id,aid)
+        await notify_admins(context,f"🧾 Payment screenshot received for social account purchase #{listing_id}. Buyer: {user.id}. Verify the transfer independently.")
+        return
+
     # Receipt screenshot for a digital product. Only photo/document proofs are accepted.
     with db() as c:
         digital_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
