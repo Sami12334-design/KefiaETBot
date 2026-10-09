@@ -2361,6 +2361,135 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p:
         await message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
+    if action == "promoter_choose_method":
+        await message.reply_text("Please tap Telebirr or CBE using the buttons shown above.")
+        return
+    if action == "promoter_account_number":
+        if len(value) < 5 or len(value) > 40:
+            await message.reply_text("Please enter a valid account/phone number (5–40 characters).")
+            return
+        state = decode_pending(data)
+        set_pending(user.id, "promoter_account_name", {"method":state.get("method","Telebirr"),"account_number":value})
+        await message.reply_text("👤 Now send the account holder's full name exactly as registered.")
+        return
+    if action == "promoter_account_name":
+        if len(value) < 2 or len(value) > 100:
+            await message.reply_text("Please enter the account holder's name (2–100 characters).")
+            return
+        state = decode_pending(data)
+        method = state.get("method","Telebirr")
+        account_number = state.get("account_number","")
+        try:
+            target = max(1,int(setting_value("promoter_target","100")))
+            points_per_join = max(1,int(setting_value("promoter_points_per_join","1")))
+        except (TypeError,ValueError):
+            target, points_per_join = 100, 1
+        channel = setting_value("promoter_channel","").strip()
+        invite_link = ""
+        status = "setup_pending"
+        try:
+            if channel:
+                link_obj = await context.bot.create_chat_invite_link(chat_id=channel, name=f"kefia-promoter-{user.id}")
+                invite_link = link_obj.invite_link
+                status = "active"
+        except Exception as exc:
+            log.warning("Could not create promoter link for user %s: %s", user.id, exc)
+        with db() as c:
+            c.execute(
+                "INSERT INTO promoter_profiles(user_id,method,account_number,account_name,status,target_count,points_per_join,completed_count,invite_link,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,0,?,?,?) ON CONFLICT(user_id) DO UPDATE SET method=excluded.method,account_number=excluded.account_number,account_name=excluded.account_name,status=excluded.status,target_count=excluded.target_count,points_per_join=excluded.points_per_join,invite_link=excluded.invite_link,updated_at=excluded.updated_at",
+                (user.id,method,account_number,value,status,target,points_per_join,invite_link,now(),now())
+            )
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await notify_admins(context, f"📣 NEW PROMOTER REGISTRATION\nUser: {user.id} (@{user.username or 'no_username'})\nName: {user.first_name or '—'}\nPayout method: {method}\nAccount number: {account_number}\nAccount holder: {value}\nStatus: {status}\nTarget: {target} verified joins\nPoints per join: {points_per_join}\nInvite link: {invite_link or 'NOT CREATED — check channel permissions'}")
+        if invite_link:
+            await message.reply_text(
+                f"🎉 Your promoter profile is saved!\n\n📡 Campaign target: {target} verified joins\n⭐ Reward: {points_per_join} points per verified join\n\n🔗 Your unique referral link:\n{invite_link}\n\nShare it with real people. Your dashboard tracks verified joins and points. Withdrawal unlocks after you reach the target and meet the minimum points requirement.",
+                reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Promotion Center","ads")]])
+            )
+        else:
+            await message.reply_text("✅ Your payout details were saved and admins were notified, but the referral link could not be created yet. Please check My promoter progress later or contact support.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Promotion Center","ads")]]))
+        return
+    if action == "admin_promoter_setting":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        field = state.get("field")
+        if field not in {"rules","channel","target","points"}:
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("That promoter setting expired."); return
+        saved = value
+        if field in {"target","points"}:
+            try:
+                number = int(value)
+                if number < 1: raise ValueError()
+            except ValueError:
+                await message.reply_text("Enter a positive whole number (1 or more). Please try again."); return
+            saved = str(number)
+        elif field == "rules":
+            if len(value) > 3500:
+                await message.reply_text("Keep the rules under 3,500 characters."); return
+        elif field == "channel":
+            try:
+                chat = await context.bot.get_chat(value)
+                member = await context.bot.get_chat_member(chat.id, context.bot.id)
+                if chat.type != "channel" or member.status not in ("administrator","creator"):
+                    await message.reply_text("The bot must be an administrator in a Telegram channel. Check the channel and try again."); return
+                saved = str(chat.id)
+            except Exception:
+                await message.reply_text("I couldn't access that channel. Send its @username or numeric ID, and make sure the bot is an admin with invite-link permission."); return
+        key = "promoter_"+field
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key,saved))
+            if field == "target":
+                c.execute("UPDATE promoter_profiles SET target_count=?,status=CASE WHEN completed_count>=? THEN 'completed' WHEN invite_link<>'' THEN 'active' ELSE 'setup_pending' END,updated_at=?", (int(saved),int(saved),now()))
+            elif field == "points":
+                c.execute("UPDATE promoter_profiles SET points_per_join=?,updated_at=?", (int(saved),now()))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Promoter setting saved: {field.replace('_',' ')}.\n\nWhat next?", reply_markup=kb([[("📣 Promoter Program","admin_promoters")],[("⬅️ Admin Dashboard","admin")]]))
+        return
+    if action == "admin_promoter_message":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        target_uid = int(state.get("user_id",0))
+        if not target_uid:
+            await message.reply_text("Promoter user was not found."); return
+        try:
+            await context.bot.send_message(target_uid, f"📩 Message from KefiaETBot admin:\n\n{value}")
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ Message sent.", reply_markup=kb([[("👤 Promoter profile",f"admin_promoter_user_{target_uid}")],[("⬅️ Promoter users","admin_promoter_users")]]))
+        except Exception:
+            await message.reply_text("Could not deliver the message. The user may have blocked the bot.")
+        return
+    if action == "admin_promoter_edit_payout":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        target_uid = int(state.get("user_id",0))
+        field = state.get("field")
+        if field not in {"method","account_number","account_name"} or not target_uid:
+            await message.reply_text("Payout edit session expired."); return
+        saved = value
+        if field == "method":
+            normalized = value.strip().lower()
+            if normalized not in {"cbe","telebirr"}:
+                await message.reply_text("Enter either Telebirr or CBE."); return
+            saved = "CBE" if normalized == "cbe" else "Telebirr"
+        if field == "account_number" and not (5 <= len(value) <= 40):
+            await message.reply_text("Enter an account/phone number between 5 and 40 characters."); return
+        if field == "account_name" and not (2 <= len(value) <= 100):
+            await message.reply_text("Enter a name between 2 and 100 characters."); return
+        with db() as c:
+            c.execute(f"UPDATE promoter_profiles SET {field}=?,updated_at=? WHERE user_id=?", (saved,now(),target_uid))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        try: await context.bot.send_message(target_uid, f"ℹ️ Your promoter payout {field.replace('_',' ')} was updated by an admin.")
+        except Exception: pass
+        await message.reply_text("✅ Payout details updated.", reply_markup=kb([[("👤 Promoter profile",f"admin_promoter_user_{target_uid}")],[("⬅️ Promoter users","admin_promoter_users")]]))
+        return
     if action == "digital_receipt":
         await message.reply_text(digital_template(
             "digital_receipt_upload_prompt",
@@ -2773,47 +2902,109 @@ async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     if cmu.old_chat_member.status in ("member", "administrator", "creator", "restricted"):
         return
+
     link = cmu.invite_link.invite_link
+    promoter_notice = None
+    promoter_uid = None
+    task_notice = None
+    task_owner_uid = None
+
     with db() as c:
         mapping = c.execute(
             "SELECT task_id,owner_user_id FROM invite_links WHERE invite_link=?", (link,)
         ).fetchone()
+
         if not mapping:
-            return
-        joined_id = cmu.new_chat_member.user.id
-        if joined_id == mapping["owner_user_id"]:
-            return
-        try:
+            promoter = c.execute(
+                "SELECT * FROM promoter_profiles WHERE invite_link=? AND status='active'", (link,)
+            ).fetchone()
+            if not promoter:
+                return
+
+            joined_user = cmu.new_chat_member.user
+            joined_id = joined_user.id
+            if joined_id == promoter["user_id"] or int(promoter["completed_count"]) >= int(promoter["target_count"]):
+                return
+
+            # Channel members do not need to have started the bot first.
             c.execute(
-                "INSERT INTO invite_events(invite_link,joined_user_id,joined_at) VALUES(?,?,?)",
-                (link, joined_id, now())
+                "INSERT OR IGNORE INTO users(user_id,username,first_name,joined_at) VALUES(?,?,?,?)",
+                (joined_id, joined_user.username or "", joined_user.first_name or "", now())
             )
-        except sqlite3.IntegrityError:
-            return
-        task = c.execute(
-            "SELECT * FROM tasks WHERE id=? AND active=1", (mapping["task_id"],)
-        ).fetchone()
-        if not task or task["completed_count"] >= task["target"]:
-            return
-        # The admin-configured points value is the reward for each unique verified join.
-        c.execute("UPDATE tasks SET completed_count=completed_count+1 WHERE id=?", (task["id"],))
-        c.execute("UPDATE users SET points=points+? WHERE user_id=?",
-                  (task["points"], mapping["owner_user_id"]))
-        new_count = task["completed_count"] + 1
-        c.execute("UPDATE task_claims SET status='in progress' WHERE task_id=? AND user_id=?",
-                  (task["id"], mapping["owner_user_id"]))
-        completed = new_count >= task["target"]
-        if completed:
-            c.execute("UPDATE tasks SET active=0 WHERE id=?", (task["id"],))
-            c.execute("UPDATE task_claims SET status='completed' WHERE task_id=?", (task["id"],))
-    message = "🎉 Verified join recorded! You earned " + str(task["points"]) + " points.\n"
-    message += "Campaign progress: " + str(new_count) + "/" + str(task["target"]) + "."
-    if completed:
-        message += "\nThe campaign target has been reached and the task is now closed."
-    try:
-        await context.bot.send_message(mapping["owner_user_id"], message)
-    except Exception:
-        log.warning("Could not notify task owner %s", mapping["owner_user_id"])
+            try:
+                c.execute(
+                    "INSERT INTO promoter_join_events(promoter_user_id,joined_user_id,invite_link,joined_at) VALUES(?,?,?,?)",
+                    (promoter["user_id"], joined_id, link, now())
+                )
+            except sqlite3.IntegrityError:
+                return
+
+            updated = c.execute(
+                "UPDATE promoter_profiles SET completed_count=completed_count+1,updated_at=? "
+                "WHERE user_id=? AND status='active' AND completed_count<target_count",
+                (now(), promoter["user_id"])
+            )
+            if updated.rowcount != 1:
+                return
+
+            reward = int(promoter["points_per_join"])
+            c.execute("UPDATE users SET points=points+? WHERE user_id=?", (reward, promoter["user_id"]))
+            new_count = int(promoter["completed_count"]) + 1
+            target = int(promoter["target_count"])
+            completed = new_count >= target
+            if completed:
+                c.execute("UPDATE promoter_profiles SET status='completed' WHERE user_id=?", (promoter["user_id"],))
+            promoter_uid = promoter["user_id"]
+            promoter_notice = (
+                f"🎉 Verified promoter join recorded! You earned {reward} points.\n"
+                f"Campaign progress: {new_count}/{target}."
+            )
+            if completed:
+                promoter_notice += "\n\n🎯 Target reached! Your withdrawal option is unlocked once you meet the minimum points requirement."
+        else:
+            joined_id = cmu.new_chat_member.user.id
+            if joined_id == mapping["owner_user_id"]:
+                return
+            try:
+                c.execute(
+                    "INSERT INTO invite_events(invite_link,joined_user_id,joined_at) VALUES(?,?,?)",
+                    (link, joined_id, now())
+                )
+            except sqlite3.IntegrityError:
+                return
+
+            task = c.execute(
+                "SELECT * FROM tasks WHERE id=? AND active=1", (mapping["task_id"],)
+            ).fetchone()
+            if not task or task["completed_count"] >= task["target"]:
+                return
+
+            c.execute("UPDATE tasks SET completed_count=completed_count+1 WHERE id=?", (task["id"],))
+            c.execute("UPDATE users SET points=points+? WHERE user_id=?",
+                      (task["points"], mapping["owner_user_id"]))
+            new_count = task["completed_count"] + 1
+            c.execute("UPDATE task_claims SET status='in progress' WHERE task_id=? AND user_id=?",
+                      (task["id"], mapping["owner_user_id"]))
+            completed = new_count >= task["target"]
+            if completed:
+                c.execute("UPDATE tasks SET active=0 WHERE id=?", (task["id"],))
+                c.execute("UPDATE task_claims SET status='completed' WHERE task_id=?", (task["id"],))
+            task_owner_uid = mapping["owner_user_id"]
+            task_notice = "🎉 Verified join recorded! You earned " + str(task["points"]) + " points.\n"
+            task_notice += "Campaign progress: " + str(new_count) + "/" + str(task["target"]) + "."
+            if completed:
+                task_notice += "\nThe campaign target has been reached and the task is now closed."
+
+    if promoter_notice and promoter_uid:
+        try:
+            await context.bot.send_message(promoter_uid, promoter_notice)
+        except Exception:
+            log.warning("Could not notify promoter %s", promoter_uid)
+    elif task_notice and task_owner_uid:
+        try:
+            await context.bot.send_message(task_owner_uid, task_notice)
+        except Exception:
+            log.warning("Could not notify task owner %s", task_owner_uid)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
