@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -93,6 +94,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS pending_inputs(
           user_id INTEGER PRIMARY KEY, action TEXT NOT NULL, data TEXT NOT NULL DEFAULT ''
         );
+        CREATE TABLE IF NOT EXISTS payout_details(
+          user_id INTEGER PRIMARY KEY, method TEXT NOT NULL,
+          account_number TEXT NOT NULL, account_name TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS crypto_orders(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+          side TEXT NOT NULL, amount_usdt REAL NOT NULL, rate_etb REAL NOT NULL,
+          total_etb REAL NOT NULL, payment_method TEXT, payment_details TEXT,
+          payout_method TEXT, payout_account_number TEXT, payout_account_name TEXT,
+          transfer_method TEXT, transfer_destination TEXT, receipt TEXT,
+          status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          admin_id INTEGER, delivery_ref TEXT
+        );
         """)
 
 
@@ -162,11 +177,524 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+
+# Crypto marketplace configuration is stored in settings and can be changed by admins
+# with /set KEY VALUE. No wallet, bank account, rate, or user payout detail is hardcoded.
+PAYMENT_METHODS = {
+    "cbe": "🏦 CBE Birr",
+    "telebirr": "📱 Telebirr",
+    "boa": "🏦 Bank of Abyssinia",
+    "other": "🏦 Other Ethiopian Bank",
+}
+SELL_NETWORKS = {
+    "bsc": "🔵 BSC (BEP20)",
+    "binance_pay": "🟡 Binance ID (Pay)",
+    "bitget": "🟢 Bitget ID",
+    "bybit": "🟣 Bybit ID",
+    "ton": "🔵 TON Network (USDT)",
+}
+
+
+def setting_value(key, default=None):
+    with db() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def setting_enabled(key, default=False):
+    return str(setting_value(key, "true" if default else "false")).strip().lower() in ("1", "true", "yes", "on", "enabled")
+
+
+def set_pending(user_id, action, data=None):
+    payload = json.dumps(data or {}, ensure_ascii=False)
+    with db() as c:
+        c.execute(
+            "INSERT INTO pending_inputs(user_id,action,data) VALUES(?,?,?) "
+            "ON CONFLICT(user_id) DO UPDATE SET action=excluded.action,data=excluded.data",
+            (user_id, action, payload),
+        )
+
+
+def decode_pending(data):
+    try:
+        value = json.loads(data or "{}")
+        return value if isinstance(value, dict) else {}
+    except (TypeError, ValueError):
+        return {}
+
+
+def enabled_buy_methods():
+    return [(slug, label) for slug, label in PAYMENT_METHODS.items()
+            if setting_enabled(f"buy_payment_{slug}_enabled")
+            and setting_value(f"buy_payment_{slug}_details", "").strip()]
+
+
+def enabled_sell_payout_methods():
+    return [(slug, label) for slug, label in PAYMENT_METHODS.items()
+            if setting_enabled(f"sell_payout_{slug}_enabled")]
+
+
+def enabled_sell_networks():
+    return [(slug, label) for slug, label in SELL_NETWORKS.items()
+            if setting_enabled(f"sell_network_{slug}_enabled")
+            and setting_value(f"sell_network_{slug}_destination", "").strip()]
+
+
+def rate_for(side, amount):
+    if amount <= 2:
+        tier = "1_2"
+    elif amount <= 5:
+        tier = "2_5"
+    else:
+        tier = "5_plus"
+    raw = setting_value(f"{side}_usdt_rate_{tier}")
+    try:
+        rate = float(raw)
+        return rate if rate > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def rates_text(side):
+    values = []
+    for tier, label in (("1_2", "1–2 USDT"), ("2_5", "over 2–5 USDT"), ("5_plus", "over 5 USDT")):
+        raw = setting_value(f"{side}_usdt_rate_{tier}")
+        try:
+            shown = f"{float(raw):g} ETB/USDT" if raw is not None and float(raw) > 0 else "not configured"
+        except (TypeError, ValueError):
+            shown = "not configured"
+        values.append(f"• {label}: {shown}")
+    return "\n".join(values)
+
+
+async def start_crypto_flow(q, context, side):
+    uid = q.from_user.id
+    enabled_key = f"{side}_enabled"
+    custom_message = setting_value(f"{side}_unavailable_message", "").strip()
+    if not setting_enabled(enabled_key, default=True):
+        if custom_message:
+            await q.edit_message_text(custom_message, reply_markup=kb([[("⬅️ Dashboard", "home")]]))
+            return
+        # Empty custom message intentionally means: skip the unavailable notice and show the normal flow.
+    if side == "buy":
+        methods = enabled_buy_methods()
+        if not methods:
+            await q.edit_message_text(
+                "🛒 Buy USDT is not configured yet. Please check back later.",
+                reply_markup=kb([[("⬅️ Marketplace", "market")], [("⬅️ Dashboard", "home")]]),
+            )
+            return
+        rows = [[(label, f"buy_method_{slug}")] for slug, label in methods]
+        rows.append([("❌ Cancel | አቋርጥ", "home")])
+        await q.edit_message_text(
+            "🛒 Buy USDT — Step 1\n\nChoose how you want to pay ETB. The payment destination and current rate will be shown before you submit proof.",
+            reply_markup=kb(rows),
+        )
+        return
+
+    with db() as c:
+        saved = c.execute("SELECT method,account_number,account_name FROM payout_details WHERE user_id=?", (uid,)).fetchone()
+    methods = enabled_sell_payout_methods()
+    rows = []
+    if saved:
+        rows.append([("✅ Use Saved Payout Details", "sell_saved")])
+    for slug, label in methods:
+        rows.append([(label, f"sell_payout_{slug}")])
+    rows.append([("❌ Cancel | አቋርጥ", "home")])
+    if not methods and not saved:
+        await q.edit_message_text(
+            "💸 Sell USDT is not configured yet. Please check back later.",
+            reply_markup=kb([[("⬅️ Marketplace", "market")], [("⬅️ Dashboard", "home")]]),
+        )
+        return
+    await q.edit_message_text(
+        "💸 Sell USDT — Step 1\n\nHow would you like to receive your ETB payout?\n"
+        "ብር ይቀበሉበታል የሚፈልጉትን የክፍያ መንገድ ይምረጡ:",
+        reply_markup=kb(rows),
+    )
+
+
+async def show_sell_networks(q, payout):
+    networks = enabled_sell_networks()
+    if not networks:
+        await q.edit_message_text(
+            "No USDT deposit methods are enabled right now. Please contact an admin.",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return
+    with db() as c:
+        rate_lines = rates_text("sell")
+        rows = [[(label, f"sell_network_{slug}")] for slug, label in networks]
+        rows.append([("❌ Cancel | አቋርጥ", "home")])
+        summary = (
+            f"💸 Sell USDT — Choose deposit method\n\n"
+            f"Your ETB payout destination\n• Method: {PAYMENT_METHODS.get(payout.get('method'), payout.get('method', '—'))}\n"
+            f"• Account number: {payout.get('account_number', '—')}\n"
+            f"• Account name: {payout.get('account_name', '—')}\n\n"
+            f"📉 Sell USDT Rates\n{rate_lines}\n\n"
+            f"How will you send the USDT?"
+        )
+    await q.edit_message_text(summary, reply_markup=kb(rows))
+
+
+async def crypto_callback(update, context, action):
+    q = update.callback_query
+    uid = q.from_user.id
+    if action in ("buy_usdt", "buy_asset", "sell_usdt"):
+        await start_crypto_flow(q, context, "sell" if action == "sell_usdt" else "buy")
+        return
+
+    if action.startswith("buy_method_"):
+        slug = action[len("buy_method_"):]
+        if slug not in PAYMENT_METHODS or not setting_enabled(f"buy_payment_{slug}_enabled"):
+            await q.edit_message_text("That payment method is currently disabled.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        details = setting_value(f"buy_payment_{slug}_details", "").strip()
+        if not details:
+            await q.edit_message_text("Payment instructions have not been configured for this method yet.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        set_pending(uid, "buy_amount", {"method": slug, "details": details})
+        await q.edit_message_text(
+            f"🛒 Buy USDT — Step 2\nPayment method: {PAYMENT_METHODS[slug]}\n\n"
+            f"Enter the amount of USDT you want to buy (minimum 1 USDT).\n\n"
+            f"Current buy rates:\n{rates_text('buy')}",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return
+
+    if action.startswith("sell_payout_"):
+        slug = action[len("sell_payout_"):]
+        if slug not in PAYMENT_METHODS or not setting_enabled(f"sell_payout_{slug}_enabled"):
+            await q.edit_message_text("That payout method is currently disabled.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        set_pending(uid, "sell_account_number", {"method": slug})
+        await q.edit_message_text(
+            f"💸 Sell USDT — Step 2\n{PAYMENT_METHODS[slug]} details\n\n"
+            "Enter the account number where you want to receive ETB. Use digits only:",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return
+
+    if action == "sell_saved":
+        with db() as c:
+            row = c.execute("SELECT method,account_number,account_name FROM payout_details WHERE user_id=?", (uid,)).fetchone()
+        if not row:
+            await q.edit_message_text("No saved payout details were found. Please choose a payout method again.", reply_markup=kb([[("⬅️ Back", "sell_usdt")]]))
+            return
+        payout = {"method": row["method"], "account_number": row["account_number"], "account_name": row["account_name"]}
+        set_pending(uid, "sell_network_select", payout)
+        await show_sell_networks(q, payout)
+        return
+
+    if action.startswith("sell_network_"):
+        slug = action[len("sell_network_"):]
+        if slug not in SELL_NETWORKS or not setting_enabled(f"sell_network_{slug}_enabled"):
+            await q.edit_message_text("That USDT deposit method is currently disabled.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        destination = setting_value(f"sell_network_{slug}_destination", "").strip()
+        if not destination:
+            await q.edit_message_text("The admin has not configured a deposit destination for this method.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+            payout = decode_pending(pending["data"]) if pending and pending["action"] == "sell_network_select" else {}
+        if not payout:
+            await q.edit_message_text("Your payout details were not found. Please restart Sell USDT.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        payout.update({"network": slug, "destination": destination})
+        set_pending(uid, "sell_amount", payout)
+        await q.edit_message_text(
+            f"💸 Sell USDT — Enter amount\nDeposit method: {SELL_NETWORKS[slug]}\n"
+            f"Current sell rates:\n{rates_text('sell')}\n\nEnter the amount of USDT you will send (minimum 1 USDT).",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return
+
+    if action == "admin_crypto_orders":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        with db() as c:
+            orders = c.execute(
+                "SELECT id,user_id,side,amount_usdt,total_etb,status FROM crypto_orders "
+                "WHERE status='pending_admin_approval' ORDER BY id LIMIT 10"
+            ).fetchall()
+        rows = []
+        for order in orders:
+            rows.append([
+                (f"#{order['id']} {order['side'].upper()} {order['amount_usdt']:g} USDT · {order['total_etb']:g} ETB", f"crypto_order_view_{order['id']}")
+            ])
+        rows.append([("⬅️ Admin Dashboard", "admin")])
+        await q.edit_message_text("🪙 Crypto orders awaiting payment verification:", reply_markup=kb(rows))
+        return
+
+    if action.startswith("crypto_order_view_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        raw_id = action.rsplit("_", 1)[-1]
+        with db() as c:
+            order = c.execute("SELECT * FROM crypto_orders WHERE id=?", (int(raw_id),)).fetchone()
+        if not order:
+            await q.edit_message_text("Order not found.")
+            return
+        method = order["payment_method"] or order["transfer_method"] or "—"
+        details = order["payment_details"] or order["transfer_destination"] or "—"
+        msg = (
+            f"🪙 Crypto order #{order['id']}\nSide: {order['side'].upper()}\n"
+            f"User: {order['user_id']}\nAmount: {order['amount_usdt']:g} USDT\n"
+            f"ETB total: {order['total_etb']:g}\nMethod: {method}\nDestination/details: {details}\n"
+            f"Status: {order['status']}"
+        )
+        rows = []
+        if order["status"] == "pending_admin_approval":
+            prefix = "buyorder" if order["side"] == "buy" else "sellorder"
+            rows.append([("✅ Verify payment & continue", f"{prefix}_verify_{order['id']}"),
+                         ("❌ Reject order", f"{prefix}_reject_{order['id']}")])
+        rows.append([("⬅️ Crypto orders", "admin_crypto_orders")])
+        await q.edit_message_text(msg, reply_markup=kb(rows))
+        return
+
+    if action.startswith(("buyorder_verify_", "sellorder_verify_")):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        order_id = int(action.rsplit("_", 1)[-1])
+        with db() as c:
+            order = c.execute("SELECT * FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
+            changed = False
+            if order and order["status"] == "pending_admin_approval":
+                cur = c.execute(
+                    "UPDATE crypto_orders SET status='payment_verified',admin_id=?,updated_at=? "
+                    "WHERE id=? AND status='pending_admin_approval'",
+                    (uid, now(), order_id),
+                )
+                changed = cur.rowcount == 1
+                if changed:
+                    set_pending(uid, "crypto_delivery", {"order_id": order_id})
+        if not order or not changed:
+            await q.edit_message_text("This order was already handled or could not be found.")
+            return
+        side_text = "USDT delivery" if order["side"] == "buy" else "ETB payout"
+        try:
+            await context.bot.send_message(
+                order["user_id"],
+                f"✅ Payment for order #{order_id} has been verified. The admin is preparing your {side_text}.",
+            )
+        except Exception:
+            log.warning("Could not notify crypto order user %s", order["user_id"])
+        await q.edit_message_text(
+            f"Payment verified for order #{order_id}.\nNow send the {side_text} to the user as a text message, photo, or document. "
+            "The order will be marked completed after you send it.",
+            reply_markup=kb([[("⬅️ Crypto orders", "admin_crypto_orders")], [("⬅️ Admin Dashboard", "admin")]]),
+        )
+        return
+
+    if action.startswith(("buyorder_reject_", "sellorder_reject_")):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        order_id = int(action.rsplit("_", 1)[-1])
+        with db() as c:
+            order = c.execute("SELECT user_id,status FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
+            changed = False
+            if order and order["status"] == "pending_admin_approval":
+                cur = c.execute("UPDATE crypto_orders SET status='rejected',admin_id=?,updated_at=? WHERE id=? AND status='pending_admin_approval'", (uid, now(), order_id))
+                changed = cur.rowcount == 1
+        if changed:
+            try:
+                await context.bot.send_message(order["user_id"], f"❌ Your crypto order #{order_id} was rejected by an admin. Please contact support if you need help.")
+            except Exception:
+                log.warning("Could not notify crypto order user %s", order["user_id"])
+            await q.edit_message_text(f"Order #{order_id} rejected.", reply_markup=kb([[("⬅️ Crypto orders", "admin_crypto_orders")], [("⬅️ Admin Dashboard", "admin")]]))
+        else:
+            await q.edit_message_text("This order was already handled or could not be found.")
+        return
+
+
+async def handle_crypto_text(update, context, action, data, value):
+    user = update.effective_user
+    message = update.effective_message
+    uid = user.id
+    state = decode_pending(data)
+
+    if action == "buy_amount":
+        try:
+            amount = float(value.replace(",", "."))
+            if amount < 1 or amount > 100000000 or not amount.is_integer() and len(value.split(".")[-1]) > 8:
+                raise ValueError()
+        except ValueError:
+            await message.reply_text("Enter a valid USDT amount of at least 1 (up to 8 decimal places).")
+            return True
+        rate = rate_for("buy", amount)
+        if not rate:
+            await message.reply_text("The admin has not configured the buy rate for this amount tier yet. Please contact support.")
+            return True
+        total = round(amount * rate, 2)
+        with db() as c:
+            cur = c.execute(
+                "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,status,created_at,updated_at) "
+                "VALUES(?,'buy',?,?,?,?,?,'awaiting_payment_proof',?,?)",
+                (uid, amount, rate, total, state["method"], state["details"], now(), now()),
+            )
+            order_id = cur.lastrowid
+            c.execute(
+                "UPDATE pending_inputs SET action='buy_receipt',data=? WHERE user_id=?",
+                (json.dumps({"order_id": order_id}), uid),
+            )
+        await message.reply_text(
+            f"🛒 Buy USDT — Order #{order_id}\nAmount: {amount:g} USDT\nRate: {rate:g} ETB/USDT\n"
+            f"Total to pay: {total:g} ETB\n\nPayment method: {PAYMENT_METHODS.get(state['method'], state['method'])}\n"
+            f"Payment instructions:\n{state['details']}\n\nAfter paying, upload a clear screenshot showing amount, recipient, status, and transaction reference. "
+            "Your screenshot is reviewed manually; it does not automatically confirm payment.",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return True
+
+    if action == "sell_account_number":
+        digits = "".join(ch for ch in value if ch.isdigit())
+        if not digits or digits != value.strip():
+            await message.reply_text("Please enter the account number using digits only.")
+            return True
+        state["account_number"] = digits
+        set_pending(uid, "sell_account_name", state)
+        await message.reply_text(
+            "Enter the account holder name exactly as registered with the bank/Telebirr:",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return True
+
+    if action == "sell_account_name":
+        if len(value) < 2 or len(value) > 120:
+            await message.reply_text("Please enter the account holder name (2–120 characters).")
+            return True
+        state["account_name"] = value
+        with db() as c:
+            c.execute(
+                "INSERT INTO payout_details(user_id,method,account_number,account_name,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET method=excluded.method,account_number=excluded.account_number,"
+                "account_name=excluded.account_name,updated_at=excluded.updated_at",
+                (uid, state["method"], state["account_number"], state["account_name"], now()),
+            )
+        set_pending(uid, "sell_network_select", state)
+        await message.reply_text("✅ Payout details saved for next time.")
+        await message.reply_text(
+            f"💸 Sell USDT — Choose deposit method\n\nPayout method: {PAYMENT_METHODS.get(state['method'], state['method'])}\n"
+            f"Account number: {state['account_number']}\nAccount name: {state['account_name']}\n\n"
+            f"📉 Sell USDT rates:\n{rates_text('sell')}\n\nChoose how you will send USDT:",
+            reply_markup=kb([[(label, f"sell_network_{slug}")] for slug, label in enabled_sell_networks()] + [[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return True
+
+    if action == "sell_amount":
+        try:
+            amount = float(value.replace(",", "."))
+            if amount < 1 or amount > 100000000 or (not amount.is_integer() and len(value.split(".")[-1]) > 8):
+                raise ValueError()
+        except ValueError:
+            await message.reply_text("Enter a valid USDT amount of at least 1 (up to 8 decimal places).")
+            return True
+        rate = rate_for("sell", amount)
+        if not rate:
+            await message.reply_text("The admin has not configured the sell rate for this amount tier yet. Please contact support.")
+            return True
+        total = round(amount * rate, 2)
+        with db() as c:
+            cur = c.execute(
+                "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payout_method,payout_account_number,payout_account_name,transfer_method,transfer_destination,status,created_at,updated_at) "
+                "VALUES(?,'sell',?,?,?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
+                (uid, amount, rate, total, state["method"], state["account_number"], state["account_name"],
+                 state["network"], state["destination"], now(), now()),
+            )
+            order_id = cur.lastrowid
+            c.execute("UPDATE pending_inputs SET action='sell_receipt',data=? WHERE user_id=?", (json.dumps({"order_id": order_id}), uid))
+        await message.reply_text(
+            f"💸 Sell USDT — Order #{order_id}\nAmount: {amount:g} USDT\nSell rate: {rate:g} ETB/USDT\n"
+            f"Expected ETB payout: {total:g} ETB\n\nSend USDT using {SELL_NETWORKS.get(state['network'], state['network'])} to:\n"
+            f"{state['destination']}\n\nAfter sending, upload a clear transfer screenshot showing amount, status, recipient, time, and transaction/order ID. "
+            "The admin will verify the transfer before sending your ETB payout.",
+            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        )
+        return True
+
+    if action == "crypto_delivery":
+        if not is_admin(uid):
+            await message.reply_text("Only an admin can deliver crypto orders.")
+            return True
+        order_id = int(state.get("order_id", 0))
+        with db() as c:
+            order = c.execute("SELECT user_id,side,status FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
+        if not order or order["status"] != "payment_verified":
+            await message.reply_text("This order is not awaiting delivery.")
+            return True
+        try:
+            await context.bot.send_message(order["user_id"], f"📦 Delivery for crypto order #{order_id}\n\n{value}")
+        except Exception:
+            await message.reply_text("Could not deliver the message to the user. The order remains open.")
+            log.exception("Could not deliver crypto order %s to user %s", order_id, order["user_id"])
+            return True
+        with db() as c:
+            c.execute("UPDATE crypto_orders SET status='completed',delivery_ref=?,updated_at=? WHERE id=? AND status='payment_verified'",
+                      ("message:" + value[:500], now(), order_id))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+        await message.reply_text(f"✅ Message sent to user. Crypto order #{order_id} marked completed.")
+        try:
+            await context.bot.send_message(order["user_id"], f"✅ Order #{order_id} is marked completed. Contact support if you need assistance.")
+        except Exception:
+            pass
+        return True
+    return False
+
+
+async def deliver_crypto_media(update, context, pending):
+    message = update.effective_message
+    admin = update.effective_user
+    state = decode_pending(pending["data"])
+    order_id = int(state.get("order_id", 0))
+    with db() as c:
+        order = c.execute("SELECT user_id,side,status FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
+    if not is_admin(admin.id) or not order or order["status"] != "payment_verified":
+        await message.reply_text("This order is not awaiting admin delivery.")
+        return
+    caption = message.caption or f"Payment/delivery proof for crypto order #{order_id}"
+    try:
+        if message.photo:
+            await context.bot.send_photo(order["user_id"], message.photo[-1].file_id, caption=f"📦 Delivery for crypto order #{order_id}\n{caption}")
+            file_ref = "photo:" + message.photo[-1].file_id
+        elif message.document:
+            await context.bot.send_document(order["user_id"], message.document.file_id, caption=f"📦 Delivery for crypto order #{order_id}\n{caption}")
+            file_ref = "document:" + message.document.file_id
+        else:
+            await message.reply_text("Please send a photo or document.")
+            return
+    except Exception:
+        log.exception("Could not deliver crypto order %s to user %s", order_id, order["user_id"])
+        await message.reply_text("Could not deliver the file to the user. The order remains open.")
+        return
+    with db() as c:
+        c.execute("UPDATE crypto_orders SET status='completed',delivery_ref=?,updated_at=? WHERE id=? AND status='payment_verified'",
+                  (file_ref, now(), order_id))
+        c.execute("DELETE FROM pending_inputs WHERE user_id=?", (admin.id,))
+    await message.reply_text(f"✅ Delivery sent. Crypto order #{order_id} marked completed.")
+    try:
+        await context.bot.send_message(order["user_id"], f"✅ Order #{order_id} is marked completed. Contact support if you need assistance.")
+    except Exception:
+        pass
+
+
+
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
     action = q.data
+    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders") or action.startswith((
+        "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_",
+        "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_"
+    )):
+        await crypto_callback(update, context, action)
+        return
     if action == "home":
         # Dashboard acts as Cancel for any unfinished text-input flow.
         with db() as c:
@@ -272,29 +800,27 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Promotions","ads")],[("⬅️ Dashboard","home")]]))
     elif action == "market":
         await q.edit_message_text("🛍 Marketplace — choose what you want to do:", reply_markup=kb([
-            [("🛒 Buy USDT / digital assets","buy_asset")],
+            [("🛒 Buy USDT","buy_usdt")],
             [("📲 Buy social-media promotion/accounts","buy_social")],
             [("💱 Sell USDT","sell_usdt")],
             [("📤 Sell a social-media asset","sell_social")],
             [("📋 My listings","my_market")],
             [("⬅️ Dashboard","home")]
         ]))
-    elif action in ("buy_asset","buy_social","sell_usdt","sell_social"):
-        labels = {"buy_asset":"buy USDT or another supported digital asset","buy_social":"buy a listed social-media service/asset",
-                  "sell_usdt":"sell USDT for ETB","sell_social":"submit a social-media asset for review"}
+    elif action in ("buy_social","sell_social"):
+        labels = {"buy_social":"buy a listed social-media service/asset",
+                  "sell_social":"submit a social-media asset for review"}
         with db() as c:
             c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET action=excluded.action,data=excluded.data",
                       (uid,action,labels[action]))
-            rate = c.execute("SELECT value FROM settings WHERE key='usdt_etb_rate'").fetchone()
-        rate_text = f"Current admin-set rate: {rate['value']} ETB per USDT." if rate else "USDT/ETB rate has not yet been configured by an admin."
-        extra = "\n" + rate_text if action in ("buy_asset","sell_usdt") else ""
-        await q.edit_message_text(f"🛍 You selected: {labels[action]}.{extra}\n\nSend details in one message: asset/service, amount, link (if applicable), and your expected price. Social-media monetization and ownership are manually reviewed; never send passwords, seed phrases, or private keys.", reply_markup=kb([[("Cancel","home")]]))
+        await q.edit_message_text(f"🛍 You selected: {labels[action]}.\n\nSend details in one message: asset/service, amount, link (if applicable), and your expected price. Social-media monetization and ownership are manually reviewed; never send passwords, seed phrases, or private keys.", reply_markup=kb([[("Cancel","home")]]))
     elif action == "admin":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
         await q.edit_message_text("🛡 Admin Dashboard\nManage tasks, review payouts and listings, configure prices, and inspect platform statistics.", reply_markup=kb([
             [("➕ Create join task","admin_new_task"),("📊 Statistics","admin_stats")],
-            [("📥 Review requests","admin_queue"),("⚙️ Set prices / limits","admin_settings")],
+            [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
+            [("⚙️ Set prices / limits","admin_settings")],
             [("⬅️ Dashboard","home")]
         ]))
     elif action == "admin_new_task":
@@ -317,7 +843,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             settings = c.execute("SELECT key,value FROM settings ORDER BY key").fetchall()
         msg = "⚙️ Current settings\n" + ("\n".join(f"{r['key']} = {r['value']}" for r in settings) if settings else "No custom settings configured.")
-        msg += "\n\nSend /set key value to update a setting. Examples: /set min_withdraw_points 1000, /set usdt_etb_rate 150"
+        msg += ("\n\nUse /set KEY VALUE to update settings. Crypto examples:\n"
+                "/set buy_usdt_rate_1_2 150\n/set buy_usdt_rate_2_5 148\n/set buy_usdt_rate_5_plus 145\n"
+                "/set buy_payment_cbe_enabled true\n/set buy_payment_cbe_details CBE account details here\n"
+                "/set sell_payout_telebirr_enabled true\n/set sell_network_bsc_enabled true\n"
+                "/set sell_network_bsc_destination YOUR_ADDRESS\n/set buy_enabled false\n"
+                "/set buy_unavailable_message Currently unavailable\n"
+                "Use value 'none' to clear an unavailable message. See the admin docs/code for supported setting keys.")
         await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Admin Dashboard","admin")]]))
     elif action == "admin_queue":
         if not is_admin(uid): return
@@ -411,9 +943,46 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         return
     with db() as c:
         pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
-        if not pending or pending["action"] != "ad_receipt":
+    if pending and pending["action"] == "crypto_delivery":
+        await deliver_crypto_media(update, context, pending)
+        return
+    if pending and pending["action"] in ("buy_receipt", "sell_receipt"):
+        state = decode_pending(pending["data"])
+        order_id = int(state.get("order_id", 0))
+        if message.photo:
+            receipt = "photo:" + message.photo[-1].file_id
+        elif message.document:
+            receipt = "document:" + message.document.file_id
+        else:
+            await message.reply_text("Please upload a screenshot as a photo or document.")
             return
-        request_id = int(pending["data"])
+        with db() as c:
+            order = c.execute("SELECT * FROM crypto_orders WHERE id=? AND user_id=? AND status='awaiting_payment_proof'", (order_id, user.id)).fetchone()
+            if not order:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text("This order is no longer waiting for payment proof.")
+                return
+            c.execute("UPDATE crypto_orders SET receipt=?,status='pending_admin_approval',updated_at=? WHERE id=? AND user_id=?",
+                      (receipt, now(), order_id, user.id))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Screenshot received for order #{order_id}. Admin will verify the actual transfer before completing your order.")
+        side_prefix = "buyorder" if order["side"] == "buy" else "sellorder"
+        caption = (f"🪙 {order['side'].upper()} USDT order #{order_id}\nUser: {user.id}\n"
+                   f"Amount: {order['amount_usdt']:g} USDT\nETB total: {order['total_etb']:g}\n"
+                   f"Status: pending admin approval. Verify the real transaction independently.")
+        for aid in ADMIN_IDS:
+            try:
+                markup = kb([[("🔎 Review order", f"crypto_order_view_{order_id}")]])
+                if message.photo:
+                    await context.bot.send_photo(aid, message.photo[-1].file_id, caption=caption, reply_markup=markup)
+                else:
+                    await context.bot.send_document(aid, message.document.file_id, caption=caption, reply_markup=markup)
+            except Exception:
+                log.warning("Could not forward crypto order %s proof to admin %s", order_id, aid)
+        return
+    if not pending or pending["action"] != "ad_receipt":
+        return
+    request_id = int(pending["data"])
         owned = c.execute("SELECT id FROM ad_requests WHERE id=? AND user_id=? AND status='quoted'", (request_id, user.id)).fetchone()
         if not owned:
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
@@ -446,16 +1015,40 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Usage: /set key value"); return
     key, value = context.args[0], " ".join(context.args[1:])
     allowed = {"min_withdraw_points","usdt_etb_rate","price_ad_product","price_ad_members","price_ad_views","referral_points"}
-    if key not in allowed:
-        await update.effective_message.reply_text(f"Allowed keys: {', '.join(sorted(allowed))}"); return
-    try:
-        if key != "min_withdraw_points" and float(value) < 0: raise ValueError()
-        if key == "min_withdraw_points" and int(value) < 1: raise ValueError()
-    except ValueError:
-        await update.effective_message.reply_text("Please enter a valid positive number."); return
+    dynamic = (
+        key in {"buy_enabled", "sell_enabled", "buy_unavailable_message", "sell_unavailable_message"}
+        or key.startswith(("buy_payment_", "sell_payout_", "sell_network_"))
+        or key in {"buy_usdt_rate_1_2", "buy_usdt_rate_2_5", "buy_usdt_rate_5_plus",
+                   "sell_usdt_rate_1_2", "sell_usdt_rate_2_5", "sell_usdt_rate_5_plus"}
+    )
+    if key not in allowed and not dynamic:
+        await update.effective_message.reply_text(
+            "Unsupported setting. Use rate keys buy_usdt_rate_1_2 / buy_usdt_rate_2_5 / buy_usdt_rate_5_plus "
+            "and the corresponding sell_usdt_rate_* keys, plus buy_payment_*, sell_payout_*, sell_network_*, "
+            "buy_enabled, sell_enabled, buy_unavailable_message, or sell_unavailable_message."
+        ); return
+    if key.endswith("_enabled") or key in ("buy_enabled", "sell_enabled"):
+        normalized = value.strip().lower()
+        if normalized not in ("true", "false", "1", "0", "yes", "no", "on", "off", "enabled", "disabled"):
+            await update.effective_message.reply_text("For enable/disable settings use true or false."); return
+        value = "true" if normalized in ("true", "1", "yes", "on", "enabled") else "false"
+    elif key.endswith("_rate_1_2") or key.endswith("_rate_2_5") or key.endswith("_rate_5_plus") or key.startswith("price_") or key == "usdt_etb_rate":
+        try:
+            if float(value) <= 0: raise ValueError()
+        except ValueError:
+            await update.effective_message.reply_text("Rates and prices must be numbers greater than zero."); return
+    elif key == "min_withdraw_points":
+        try:
+            if int(value) < 1: raise ValueError()
+        except ValueError:
+            await update.effective_message.reply_text("Minimum withdrawal points must be a positive whole number."); return
+    elif key in ("buy_unavailable_message", "sell_unavailable_message") and value.strip().lower() == "none":
+        value = ""
+    elif not value.strip():
+        await update.effective_message.reply_text("Setting value cannot be empty."); return
     with db() as c:
         c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(key,value))
-    await update.effective_message.reply_text(f"Updated {key} = {value}")
+    await update.effective_message.reply_text(f"Updated {key} = {value if value else '(cleared)'}")
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -467,6 +1060,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.effective_message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
     value = update.effective_message.text.strip()
+    if await handle_crypto_text(update, context, action, data, value):
+        return
     if action == "admin_task_title":
         if not is_admin(user.id): return
         parts = [x.strip() for x in value.split("|")]
