@@ -819,14 +819,14 @@ async def digital_callback(update, context, action):
         if len(gateways) == 1:
             await show_digital_payment(q, uid, product, gateways[0])
             return
-        rows = [[(g["name"], f"digital_gateway_{product_id}_{g['id']}")] for g in gateways]
+        rows = [[(g["name"], f"digital_gateway_{product_id}::{g['id']}")] for g in gateways]
         rows.append([("❌ Cancel | አቋርጥ", "digital_cancel")])
         set_pending(uid, "digital_choose_gateway", {"product_id": product_id})
         await q.edit_message_text("Choose your payment method:", reply_markup=kb(rows))
         return
 
     if action.startswith("digital_gateway_"):
-        parts = action[len("digital_gateway_"):].split("_", 1)
+        parts = action[len("digital_gateway_"):].split("::", 1)
         if len(parts) != 2:
             await q.edit_message_text("Invalid payment option.")
             return
@@ -1254,6 +1254,14 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("Please upload a receipt screenshot as a photo or document.")
             return
         with db() as c:
+            reserved = c.execute(
+                "UPDATE digital_products SET stock=stock-1,updated_at=? WHERE id=? AND active=1 AND stock>0",
+                (now(), product["id"])
+            )
+            if reserved.rowcount != 1:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text(digital_template("digital_no_stock_message", "This product is out of stock."))
+                return
             cur = c.execute(
                 "INSERT INTO digital_orders(user_id,product_id,product_name,duration_months,price,gateway_id,gateway_name,receipt_file_id,receipt_type,status,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,'pending_approval',?,?)",
@@ -1435,18 +1443,22 @@ async def send_digital_admin_reply(update, context, order_id, reply_text, reject
         if not order or order["status"] != "pending_approval":
             await update.effective_message.reply_text("Order not found or already processed.")
             return
-        status = "rejected" if reject else "completed"
-        c.execute("UPDATE digital_orders SET status=?,admin_id=?,admin_reply=?,updated_at=? WHERE id=? AND status='pending_approval'",
-                  (status, admin_id, reply_text, now(), order_id))
-        if not reject:
-            c.execute("UPDATE digital_products SET stock=CASE WHEN stock>0 THEN stock-1 ELSE 0 END,updated_at=? WHERE id=?",
-                      (now(), order["product_id"]))
+    status = "rejected" if reject else "completed"
     try:
         await context.bot.send_message(order["user_id"], reply_text)
-        await update.effective_message.reply_text(f"Message sent to user {order['user_id']}; order #{order_id} marked {status}.")
     except Exception:
         log.exception("Could not deliver admin reply for digital order %s", order_id)
-        await update.effective_message.reply_text("The message could not be delivered. The order status was saved; please check the user's chat and retry manually.")
+        await update.effective_message.reply_text("The message could not be delivered. The order remains pending; correct the user's chat issue and try again.")
+        return
+    with db() as c:
+        cur = c.execute("UPDATE digital_orders SET status=?,admin_id=?,admin_reply=?,updated_at=? WHERE id=? AND status='pending_approval'",
+                        (status, admin_id, reply_text, now(), order_id))
+        if cur.rowcount != 1:
+            await update.effective_message.reply_text("The message was sent, but this order was processed concurrently. Please review its status.")
+            return
+        if reject:
+            c.execute("UPDATE digital_products SET stock=stock+1,updated_at=? WHERE id=?", (now(), order["product_id"]))
+    await update.effective_message.reply_text(f"Message sent to user {order['user_id']}; order #{order_id} marked {status}.")
 
 
 async def handle_digital_admin_command(update, context, value):
