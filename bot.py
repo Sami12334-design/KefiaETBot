@@ -2454,6 +2454,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 c.execute("DELETE FROM invite_events WHERE invite_link=?", (link,))
             c.execute("DELETE FROM invite_links WHERE task_id=?", (tid,))
             c.execute("DELETE FROM task_claims WHERE task_id=?", (tid,))
+            c.execute("DELETE FROM settings WHERE key=?", (f"task_message_template_{tid}",))
             cur = c.execute("DELETE FROM tasks WHERE id=?", (tid,))
         await q.edit_message_text("🗑 Task removed. Previously awarded points remain unchanged.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")],[("⬅️ Admin Dashboard","admin")]]))
     elif action.startswith("admintask_leaderboard_"):
