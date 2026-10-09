@@ -109,7 +109,49 @@ def init_db():
           status TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
           admin_id INTEGER, delivery_ref TEXT
         );
+        CREATE TABLE IF NOT EXISTS digital_products(
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, duration_months INTEGER NOT NULL DEFAULT 1,
+          price REAL NOT NULL DEFAULT 0, stock INTEGER NOT NULL DEFAULT 0,
+          description TEXT NOT NULL DEFAULT '', features TEXT NOT NULL DEFAULT '',
+          important_note TEXT NOT NULL DEFAULT '', notice TEXT NOT NULL DEFAULT '',
+          warranty TEXT NOT NULL DEFAULT '', active INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS digital_payment_gateways(
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, account_number TEXT NOT NULL DEFAULT '',
+          account_name TEXT NOT NULL DEFAULT '', instructions TEXT NOT NULL DEFAULT '',
+          warning TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS digital_orders(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+          product_id TEXT NOT NULL, product_name TEXT NOT NULL, duration_months INTEGER NOT NULL,
+          price REAL NOT NULL, gateway_id TEXT NOT NULL, gateway_name TEXT NOT NULL,
+          receipt_file_id TEXT NOT NULL, receipt_type TEXT NOT NULL DEFAULT 'photo',
+          status TEXT NOT NULL DEFAULT 'pending_approval', created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL, admin_id INTEGER, admin_reply TEXT
+        );
         """)
+        # Editable database defaults: admins can replace these values without code changes.
+        c.execute("""INSERT OR IGNORE INTO digital_products
+          (id,name,duration_months,price,stock,description,features,important_note,notice,warranty,active,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+          ("gemini_pro_18m","Gemini Pro",18,0,0,
+           "You will receive a self-activation link that you can claim yourself. It works with both new and existing Gmail accounts...",
+           "Feature 1\nFeature 2\nFeature 3",
+           "The redeem link must be used within the time set by the admin.",
+           "Activation links may expire if not claimed in time.",
+           "No warranty",1,now()))
+        for key, value in (
+            ("digital_waiting_message", "✅ Your receipt has been received. Please wait while the admin verifies your payment. You will receive your activation link shortly."),
+            ("digital_no_stock_message", "This product is currently out of stock. Please check back later."),
+            ("digital_no_gateway_message", "Payment is temporarily unavailable for this product. Please contact an admin."),
+            ("digital_cancel_message", "Your purchase was cancelled."),
+            ("digital_order_submitted_message", "Your payment receipt has been submitted for admin approval."),
+            ("digital_product_details_template", "🌟 {name} {duration}m\n\n💰 Price: {price} ETB each\n📦 In stock: {stock}\n\n📝 DESCRIPTION\n{description}\n\n✨ FEATURES\n{features}\n\n📌 Important Note:\n{note}\n\n🚨 NOTICE\n{notice}\n\n🎯 Price: {price} ETB / unit\n🛡️ Warranty: {warranty}\n\nTap Buy now when you are ready."),
+            ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}")
+        ):
+            c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key,value))
 
 
 def now():
@@ -684,11 +726,256 @@ async def deliver_crypto_media(update, context, pending):
 
 
 
+# Dynamic digital-goods catalogue and receipt approval flow.
+def digital_template(key, fallback=""):
+    return setting_value(key, fallback) or ""
+
+
+def digital_products(active_only=True):
+    with db() as c:
+        sql = "SELECT * FROM digital_products" + (" WHERE active=1" if active_only else "") + " ORDER BY name COLLATE NOCASE"
+        return c.execute(sql).fetchall()
+
+
+def digital_product(product_id):
+    with db() as c:
+        return c.execute("SELECT * FROM digital_products WHERE id=?", (product_id,)).fetchone()
+
+
+def digital_gateways():
+    with db() as c:
+        return c.execute("SELECT * FROM digital_payment_gateways WHERE enabled=1 ORDER BY name COLLATE NOCASE").fetchall()
+
+
+def render_digital_template(template, values):
+    # Templates are admin-editable in SQLite. Unknown placeholders remain readable.
+    class SafeValues(dict):
+        def __missing__(self, key):
+            return "{" + key + "}"
+    try:
+        return str(template).format_map(SafeValues(values))
+    except Exception:
+        log.exception("Invalid digital-goods message template")
+        return str(template)
+
+
+def digital_product_values(product):
+    features = "\n".join(
+        f"• {line.strip()}" for line in (product["features"] or "").splitlines() if line.strip()
+    ) or "—"
+    return {
+        "id": product["id"], "name": product["name"],
+        "duration": product["duration_months"], "price": f"{float(product['price']):g}",
+        "stock": product["stock"], "description": product["description"] or "—",
+        "features": features, "note": product["important_note"] or "—",
+        "notice": product["notice"] or "—", "warranty": product["warranty"] or "—",
+    }
+
+
+async def digital_callback(update, context, action):
+    q = update.callback_query
+    uid = q.from_user.id
+    if action.startswith("digital_product_"):
+        product_id = action[len("digital_product_"):]
+        product = digital_product(product_id)
+        if not product or not product["active"]:
+            await q.edit_message_text(digital_template("digital_no_stock_message", "Product unavailable."))
+            return
+        values = digital_product_values(product)
+        body = render_digital_template(
+            digital_template("digital_product_details_template"), values
+        )
+        await q.edit_message_text(body, reply_markup=kb([
+            [("🌟 Buy now", f"digital_buy_{product_id}")],
+            [("❌ Cancel | አቋርጥ", "digital_cancel")]
+        ]))
+        return
+
+    if action == "digital_cancel":
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+        await q.edit_message_text(
+            digital_template("digital_cancel_message", "Purchase cancelled."),
+            reply_markup=kb([[("⬅️ Marketplace", "market")], [("⬅️ Dashboard", "home")]])
+        )
+        return
+
+    if action.startswith("digital_buy_"):
+        product_id = action[len("digital_buy_"):]
+        product = digital_product(product_id)
+        if not product or not product["active"]:
+            await q.edit_message_text(digital_template("digital_no_stock_message", "Product unavailable."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        if int(product["stock"]) <= 0:
+            await q.edit_message_text(digital_template("digital_no_stock_message", "This product is out of stock."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        gateways = digital_gateways()
+        if not gateways:
+            await q.edit_message_text(digital_template("digital_no_gateway_message", "Payment unavailable."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        if len(gateways) == 1:
+            await show_digital_payment(q, uid, product, gateways[0])
+            return
+        rows = [[(g["name"], f"digital_gateway_{product_id}_{g['id']}")] for g in gateways]
+        rows.append([("❌ Cancel | አቋርጥ", "digital_cancel")])
+        set_pending(uid, "digital_choose_gateway", {"product_id": product_id})
+        await q.edit_message_text("Choose your payment method:", reply_markup=kb(rows))
+        return
+
+    if action.startswith("digital_gateway_"):
+        parts = action[len("digital_gateway_"):].split("_", 1)
+        if len(parts) != 2:
+            await q.edit_message_text("Invalid payment option.")
+            return
+        product_id, gateway_id = parts
+        product = digital_product(product_id)
+        with db() as c:
+            gateway = c.execute("SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (gateway_id,)).fetchone()
+        if not product or not gateway or int(product["stock"]) <= 0:
+            await q.edit_message_text(digital_template("digital_no_stock_message", "Product or payment option unavailable."),
+                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            return
+        await show_digital_payment(q, uid, product, gateway)
+        return
+
+    if action == "admin_digital_products":
+        if not is_admin(uid):
+            await q.edit_message_text("Admin access only.")
+            return
+        products = digital_products(active_only=False)
+        rows = [[(f"{p['name']} · {p['duration_months']}m · {p['price']:g} ETB · stock {p['stock']}",
+                  f"digital_admin_product_{p['id']}")] for p in products]
+        rows.extend([
+            [("📥 Pending digital orders", "admin_digital_orders")],
+            [("➕ Add product instructions", "digital_admin_help")],
+            [("⬅️ Admin Dashboard", "admin")]
+        ])
+        await q.edit_message_text(
+            "Digital products are database-driven. Select a product to view its ID and editable fields.",
+            reply_markup=kb(rows)
+        )
+        return
+
+    if action == "digital_admin_help":
+        if not is_admin(uid):
+            await q.edit_message_text("Admin access only.")
+            return
+        await q.edit_message_text(
+            "Admin commands (all values are stored in the database):\n"
+            "/product_add ID | NAME | MONTHS | PRICE | STOCK\n"
+            "/product_set ID FIELD VALUE\n"
+            "Fields: name, duration_months, price, stock, description, features, important_note, notice, warranty, active\n"
+            "/gateway_set ID | NAME | ACCOUNT_NUMBER | ACCOUNT_NAME | INSTRUCTIONS | WARNING\n"
+            "/gateway_toggle ID true/false\n"
+            "/digital_waiting MESSAGE\n"
+            "/digital_text KEY MESSAGE (edit templates/messages)\n"
+            "For multi-line values, use the command and separate fields with | where supported."
+        )
+        return
+
+    if action.startswith("digital_admin_product_"):
+        if not is_admin(uid):
+            await q.edit_message_text("Admin access only.")
+            return
+        product_id = action[len("digital_admin_product_"):]
+        product = digital_product(product_id)
+        if not product:
+            await q.edit_message_text("Product not found.")
+            return
+        await q.edit_message_text(
+            f"Product ID: {product['id']}\nName: {product['name']}\nDuration: {product['duration_months']} months\n"
+            f"Price: {product['price']:g} ETB\nStock: {product['stock']}\nActive: {product['active']}\n"
+            f"Description: {product['description']}\nFeatures: {product['features']}\n"
+            f"Important note: {product['important_note']}\nNotice: {product['notice']}\nWarranty: {product['warranty']}\n\n"
+            f"Edit with /product_set {product_id} FIELD VALUE",
+            reply_markup=kb([[("📥 Pending digital orders", "admin_digital_orders")],
+                             [("⬅️ Digital Products", "admin_digital_products")]])
+        )
+        return
+
+    if action == "admin_digital_orders":
+        if not is_admin(uid):
+            await q.edit_message_text("Admin access only.")
+            return
+        with db() as c:
+            orders = c.execute(
+                "SELECT id,user_id,product_name,duration_months,price,gateway_name,status FROM digital_orders "
+                "WHERE status='pending_approval' ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+        rows = [[(f"Order #{o['id']} · {o['product_name']} {o['duration_months']}m · {o['price']:g} ETB · user {o['user_id']}",
+                  f"digital_order_view_{o['id']}")] for o in orders]
+        rows.append([("⬅️ Digital Products", "admin_digital_products")])
+        await q.edit_message_text("Pending digital-goods orders:", reply_markup=kb(rows))
+        return
+
+    if action.startswith("digital_order_view_"):
+        if not is_admin(uid):
+            await q.edit_message_text("Admin access only.")
+            return
+        try:
+            order_id = int(action[len("digital_order_view_"):])
+        except ValueError:
+            await q.edit_message_text("Invalid order ID.")
+            return
+        with db() as c:
+            order = c.execute("SELECT * FROM digital_orders WHERE id=?", (order_id,)).fetchone()
+        if not order:
+            await q.edit_message_text("Order not found.")
+            return
+        await q.edit_message_text(
+            f"Digital order #{order_id}\nUser ID: {order['user_id']}\nProduct: {order['product_name']} "
+            f"{order['duration_months']}m\nPrice: {order['price']:g} ETB\nPayment: {order['gateway_name']}\n"
+            f"Status: {order['status']}\nCreated: {order['created_at']}",
+            reply_markup=kb([[("✉️ Reply / Send redeem link", f"digital_reply_{order_id}")],
+                             [("🚫 Reject with message", f"digital_reject_{order_id}")],
+                             [("⬅️ Pending orders", "admin_digital_orders")]])
+        )
+        return
+
+    if action.startswith(("digital_reply_", "digital_reject_")):
+        if not is_admin(uid):
+            await q.edit_message_text("Admin access only.")
+            return
+        reject = action.startswith("digital_reject_")
+        order_id = int(action.rsplit("_", 1)[1])
+        with db() as c:
+            order = c.execute("SELECT id,status FROM digital_orders WHERE id=?", (order_id,)).fetchone()
+        if not order or order["status"] != "pending_approval":
+            await q.edit_message_text("This order is not pending approval.")
+            return
+        set_pending(uid, "digital_admin_reply", {"order_id": order_id, "reject": reject})
+        await q.edit_message_text(
+            f"Send the custom {'rejection reason' if reject else 'activation link / message'} for order #{order_id} as your next text message."
+        )
+        return
+
+
+async def show_digital_payment(q, uid, product, gateway):
+    values = digital_product_values(product)
+    values.update({
+        "gateway_name": gateway["name"], "account_number": gateway["account_number"],
+        "account_name": gateway["account_name"], "instructions": gateway["instructions"] or "—",
+        "warning": gateway["warning"] or "—",
+    })
+    text_body = render_digital_template(digital_template("digital_payment_template"), values)
+    set_pending(uid, "digital_receipt", {"product_id": product["id"], "gateway_id": gateway["id"]})
+    await q.edit_message_text(text_body, reply_markup=kb([[("❌ Cancel | አቋርጥ", "digital_cancel")]]))
+
+
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
     action = q.data
+    if action.startswith(("digital_product_", "digital_buy_", "digital_gateway_", "digital_admin_product_",
+                          "digital_order_view_", "digital_reply_", "digital_reject_")) or action in (
+        "digital_cancel", "admin_digital_products", "admin_digital_orders", "digital_admin_help"
+    ):
+        await digital_callback(update, context, action)
+        return
     if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders") or action.startswith((
         "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_",
         "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_"
@@ -799,14 +1086,18 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = "📋 Your ad requests\n" + ("\n".join(f"#{r['id']} · {r['kind']} · {r['status']} · {r['quoted_price'] if r['quoted_price'] is not None else 'quote pending'} ETB" for r in rows) if rows else "No ad requests yet.")
         await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Promotions","ads")],[("⬅️ Dashboard","home")]]))
     elif action == "market":
-        await q.edit_message_text("🛍 Marketplace — choose what you want to do:", reply_markup=kb([
+        rows = [
             [("🛒 Buy USDT","buy_usdt")],
             [("📲 Buy social-media promotion/accounts","buy_social")],
             [("💸 Sell USDT | USDT ይሽጡ","sell_usdt")],
             [("📤 Sell a social-media asset","sell_social")],
             [("📋 My listings","my_market")],
-            [("⬅️ Dashboard","home")]
-        ]))
+        ]
+        for product in digital_products():
+            label = f"🌟 {product['name']} {product['duration_months']}m ({product['price']:g} ETB)"
+            rows.append([(label[:60], f"digital_product_{product['id']}")])
+        rows.append([("⬅️ Dashboard","home")])
+        await q.edit_message_text("🛍 Marketplace — choose what you want to do:", reply_markup=kb(rows))
     elif action in ("buy_social","sell_social"):
         labels = {"buy_social":"buy a listed social-media service/asset",
                   "sell_social":"submit a social-media asset for review"}
@@ -821,6 +1112,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("➕ Create join task","admin_new_task"),("📊 Statistics","admin_stats")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
+            [("🌟 Digital Products / Orders","admin_digital_products")],
             [("⬅️ Dashboard","home")]
         ]))
     elif action == "admin_new_task":
@@ -940,6 +1232,51 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     message = update.effective_message
     if not user or not message:
+        return
+    # Receipt screenshot for a digital product. Only photo/document proofs are accepted.
+    with db() as c:
+        digital_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+    if digital_pending and digital_pending["action"] == "digital_receipt":
+        state = decode_pending(digital_pending["data"])
+        product = digital_product(state.get("product_id", ""))
+        with db() as c:
+            gateway = c.execute("SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (state.get("gateway_id", ""),)).fetchone()
+        if not product or not gateway or int(product["stock"]) <= 0:
+            with db() as c:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text(digital_template("digital_no_stock_message", "Product or payment option unavailable."))
+            return
+        if message.photo:
+            receipt_file_id, receipt_type = message.photo[-1].file_id, "photo"
+        elif message.document:
+            receipt_file_id, receipt_type = message.document.file_id, "document"
+        else:
+            await message.reply_text("Please upload a receipt screenshot as a photo or document.")
+            return
+        with db() as c:
+            cur = c.execute(
+                "INSERT INTO digital_orders(user_id,product_id,product_name,duration_months,price,gateway_id,gateway_name,receipt_file_id,receipt_type,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,'pending_approval',?,?)",
+                (user.id, product["id"], product["name"], product["duration_months"], product["price"],
+                 gateway["id"], gateway["name"], receipt_file_id, receipt_type, now(), now())
+            )
+            order_id = cur.lastrowid
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(digital_template("digital_waiting_message", "Receipt received; waiting for admin review."))
+        caption = (
+            f"🌟 DIGITAL ORDER #{order_id}\nUser ID: {user.id}\nProduct: {product['name']} "
+            f"{product['duration_months']}m\nPrice: {product['price']:g} ETB\nGateway: {gateway['name']}\n"
+            "Status: Pending Approval"
+        )
+        for aid in ADMIN_IDS:
+            try:
+                markup = kb([[(f"Review order #{order_id}", f"digital_order_view_{order_id}")]])
+                if receipt_type == "photo":
+                    await context.bot.send_photo(aid, receipt_file_id, caption=caption, reply_markup=markup)
+                else:
+                    await context.bot.send_document(aid, receipt_file_id, caption=caption, reply_markup=markup)
+            except Exception:
+                log.exception("Could not forward digital order %s receipt to admin %s", order_id, aid)
         return
     with db() as c:
         pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
@@ -1088,15 +1425,154 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text(f"Updated {key} = {value if value else '(cleared)'}")
 
 
+async def send_digital_admin_reply(update, context, order_id, reply_text, reject=False):
+    admin_id = update.effective_user.id
+    if not is_admin(admin_id):
+        await update.effective_message.reply_text("Admin access only.")
+        return
+    with db() as c:
+        order = c.execute("SELECT * FROM digital_orders WHERE id=?", (order_id,)).fetchone()
+        if not order or order["status"] != "pending_approval":
+            await update.effective_message.reply_text("Order not found or already processed.")
+            return
+        status = "rejected" if reject else "completed"
+        c.execute("UPDATE digital_orders SET status=?,admin_id=?,admin_reply=?,updated_at=? WHERE id=? AND status='pending_approval'",
+                  (status, admin_id, reply_text, now(), order_id))
+        if not reject:
+            c.execute("UPDATE digital_products SET stock=CASE WHEN stock>0 THEN stock-1 ELSE 0 END,updated_at=? WHERE id=?",
+                      (now(), order["product_id"]))
+    try:
+        await context.bot.send_message(order["user_id"], reply_text)
+        await update.effective_message.reply_text(f"Message sent to user {order['user_id']}; order #{order_id} marked {status}.")
+    except Exception:
+        log.exception("Could not deliver admin reply for digital order %s", order_id)
+        await update.effective_message.reply_text("The message could not be delivered. The order status was saved; please check the user's chat and retry manually.")
+
+
+async def handle_digital_admin_command(update, context, value):
+    msg = update.effective_message
+    if value.startswith("/product_add "):
+        raw = value[len("/product_add "):]
+        parts = [p.strip() for p in raw.split("|", 4)]
+        if len(parts) != 5 or not parts[0] or not parts[1]:
+            await msg.reply_text("Format: /product_add ID | NAME | MONTHS | PRICE | STOCK")
+            return True
+        try:
+            months, price, stock = int(parts[2]), float(parts[3]), int(parts[4])
+            if months < 1 or price < 0 or stock < 0 or not math.isfinite(price): raise ValueError()
+        except ValueError:
+            await msg.reply_text("Months must be positive; price and stock must be zero or greater.")
+            return True
+        with db() as c:
+            c.execute("INSERT INTO digital_products(id,name,duration_months,price,stock,updated_at) VALUES(?,?,?,?,?,?)",
+                      (parts[0],parts[1],months,price,stock,now()))
+        await msg.reply_text("Digital product added. Set its description/features with /product_set.")
+        return True
+    if value.startswith("/product_set "):
+        parts = value[len("/product_set "):].split(" ", 2)
+        if len(parts) != 3:
+            await msg.reply_text("Format: /product_set ID FIELD VALUE")
+            return True
+        product_id, field, raw_value = parts
+        allowed = {"name","duration_months","price","stock","description","features","important_note","notice","warranty","active"}
+        if field not in allowed:
+            await msg.reply_text("Field must be one of: " + ", ".join(sorted(allowed)))
+            return True
+        if field in {"duration_months","stock"}:
+            try:
+                parsed = int(raw_value)
+                if parsed < (1 if field == "duration_months" else 0): raise ValueError()
+            except ValueError:
+                await msg.reply_text("Duration must be at least 1 month; stock must be zero or greater.")
+                return True
+            raw_value = parsed
+        elif field == "price":
+            try:
+                parsed = float(raw_value)
+                if parsed < 0 or not math.isfinite(parsed): raise ValueError()
+            except ValueError:
+                await msg.reply_text("Price must be zero or greater.")
+                return True
+            raw_value = parsed
+        elif field == "active":
+            flag = raw_value.lower()
+            if flag not in {"true","false","1","0","yes","no","on","off"}:
+                await msg.reply_text("Active must be true or false.")
+                return True
+            raw_value = 1 if flag in {"true","1","yes","on"} else 0
+        with db() as c:
+            cur = c.execute(f"UPDATE digital_products SET {field}=?,updated_at=? WHERE id=?", (raw_value,now(),product_id))
+        await msg.reply_text("Product updated." if cur.rowcount else "Product ID not found.")
+        return True
+    if value.startswith("/gateway_set "):
+        parts = [p.strip() for p in value[len("/gateway_set "):].split("|", 5)]
+        if len(parts) != 6 or not parts[0] or not parts[1]:
+            await msg.reply_text("Format: /gateway_set ID | NAME | ACCOUNT_NUMBER | ACCOUNT_NAME | INSTRUCTIONS | WARNING")
+            return True
+        with db() as c:
+            c.execute("INSERT INTO digital_payment_gateways(id,name,account_number,account_name,instructions,warning,enabled,updated_at) "
+                      "VALUES(?,?,?,?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,account_number=excluded.account_number,"
+                      "account_name=excluded.account_name,instructions=excluded.instructions,warning=excluded.warning,updated_at=excluded.updated_at",
+                      (*parts, now()))
+        await msg.reply_text("Payment gateway saved and enabled.")
+        return True
+    if value.startswith("/gateway_toggle "):
+        parts = value.split()
+        if len(parts) != 3 or parts[2].lower() not in {"true","false","1","0","yes","no","on","off"}:
+            await msg.reply_text("Format: /gateway_toggle ID true/false")
+            return True
+        enabled = 1 if parts[2].lower() in {"true","1","yes","on"} else 0
+        with db() as c:
+            cur = c.execute("UPDATE digital_payment_gateways SET enabled=?,updated_at=? WHERE id=?", (enabled,now(),parts[1]))
+        await msg.reply_text("Gateway updated." if cur.rowcount else "Gateway ID not found.")
+        return True
+    if value.startswith("/digital_waiting "):
+        new_text = value[len("/digital_waiting "):].strip()
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('digital_waiting_message',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_text,))
+        await msg.reply_text("Digital-order waiting message updated.")
+        return True
+    if value.startswith("/digital_text "):
+        parts = value[len("/digital_text "):].split(" ", 1)
+        if len(parts) != 2 or not parts[1].strip():
+            await msg.reply_text("Format: /digital_text KEY MESSAGE")
+            return True
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (parts[0],parts[1]))
+        await msg.reply_text("Database message/template updated.")
+        return True
+    return False
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not user or not update.effective_message or not update.effective_message.text: return
+    message = update.effective_message
+    if not user or not message or not message.text: return
+    value = message.text.strip()
+
+    # Admin can reply directly to the forwarded receipt in the private admin chat.
+    if is_admin(user.id) and message.reply_to_message:
+        caption = message.reply_to_message.caption or ""
+        import re
+        match = re.search(r"DIGITAL ORDER #([0-9]+)", caption)
+        if match and value:
+            await send_digital_admin_reply(update, context, int(match.group(1)), value, reject=False)
+            return
+
+    # Database-backed admin commands for products, gateways and editable user messages.
+    if is_admin(user.id) and await handle_digital_admin_command(update, context, value):
+        return
+
     with db() as c:
         p = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
     if not p:
-        await update.effective_message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
+        await message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
-    value = update.effective_message.text.strip()
+    if action == "digital_admin_reply":
+        state = decode_pending(data)
+        await send_digital_admin_reply(update, context, int(state.get("order_id", 0)), value,
+                                       reject=bool(state.get("reject", False)))
+        return
     if await handle_crypto_text(update, context, action, data, value):
         return
     if action == "admin_task_title":
