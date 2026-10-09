@@ -2386,7 +2386,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             key = state.get("key")
             allowed = {
                 "digital_product_details_template", "digital_payment_template", "digital_waiting_message",
-                "digital_no_stock_message", "digital_no_gateway_message", "digital_cancel_message",
+                "digital_no_stock_message", "digital_no_gateway_message", "digital_invalid_payment_message", "digital_cancel_message",
                 "digital_buy_button", "digital_cancel_button",
                 "digital_market_button", "digital_choose_gateway_prompt", "digital_market_title",
                 "digital_market_product_button_template", "digital_receipt_upload_prompt"
