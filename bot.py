@@ -2,6 +2,8 @@ import os
 import asyncio
 import sqlite3
 import logging
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from functools import wraps
 
@@ -590,12 +592,41 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.exception("Unhandled update error", exc_info=context.error)
 
 
+class HealthHandler(BaseHTTPRequestHandler):
+    """Minimal HTTP endpoint so Render Web Service can detect an open port."""
+
+    def do_GET(self):
+        if self.path not in ("/", "/health"):
+            self.send_response(404)
+            self.end_headers()
+            self.wfile.write(b"Not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"KefiaETBot is running")
+
+    def log_message(self, format, *args):
+        # Avoid noisy per-request logs.
+        return
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", "10000"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), HealthHandler)
+    thread = threading.Thread(target=server.serve_forever, name="render-health-server", daemon=True)
+    thread.start()
+    log.info("Health endpoint listening on port %s", port)
+    return server
+
+
 def main():
     if not TOKEN:
         raise RuntimeError("Set BOT_TOKEN environment variable.")
     if not ADMIN_IDS:
         log.warning("ADMIN_IDS is empty. Admin dashboard and approvals will be unavailable.")
     init_db()
+    health_server = start_health_server()
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set", set_setting))
@@ -618,6 +649,8 @@ def main():
             close_loop=False,
         )
     finally:
+        health_server.shutdown()
+        health_server.server_close()
         if not loop.is_closed():
             loop.close()
         asyncio.set_event_loop(None)
