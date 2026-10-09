@@ -167,7 +167,14 @@ def init_db():
             ("digital_no_stock_message", "This product is currently out of stock. Please check back later."),
             ("digital_no_gateway_message", "Payment is temporarily unavailable for this product. Please contact an admin."),
             ("digital_cancel_message", "Your purchase was cancelled."),
-            ("digital_order_submitted_message", "Your payment receipt has been submitted for admin approval."),
+            ("digital_order_submitted_message", "✅ Your receipt has been submitted! Your order is now under review. We’ll message you after the admin checks it."),
+            ("digital_buy_button", "🌟 Buy now"),
+            ("digital_cancel_button", "❌ Cancel | አቋርጥ"),
+            ("digital_market_button", "⬅️ Marketplace"),
+            ("digital_choose_gateway_prompt", "💳 Choose your payment method:"),
+            ("digital_market_title", "🛍 Marketplace — choose what you want to do:"),
+            ("digital_market_product_button_template", "🌟 {name} · {duration} months · {price} ETB"),
+            ("digital_receipt_upload_prompt", "📸 After paying, upload a clear payment receipt screenshot as a photo or document."),
             ("digital_product_details_template", "🌟 {name} {duration}m\n\n💰 Price: {price} ETB each\n📦 In stock: {stock}\n\n📝 DESCRIPTION\n{description}\n\n✨ FEATURES\n{features}\n\n📌 Important Note:\n{note}\n\n🚨 NOTICE\n{notice}\n\n🎯 Price: {price} ETB / unit\n🛡️ Warranty: {warranty}\n\nTap Buy now when you are ready."),
             ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}")
         ):
@@ -1005,8 +1012,8 @@ async def digital_callback(update, context, action):
             digital_template("digital_product_details_template"), values
         )
         await q.edit_message_text(body, reply_markup=kb([
-            [("🌟 Buy now", f"digital_buy_{product_id}")],
-            [("❌ Cancel | አቋርጥ", "digital_cancel")]
+            [(digital_template("digital_buy_button", "🌟 Buy now"), f"digital_buy_{product_id}")],
+            [(digital_template("digital_cancel_button", "❌ Cancel | አቋርጥ"), "digital_cancel")]
         ]))
         return
 
@@ -1015,7 +1022,7 @@ async def digital_callback(update, context, action):
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
         await q.edit_message_text(
             digital_template("digital_cancel_message", "Purchase cancelled."),
-            reply_markup=kb([[("⬅️ Marketplace", "market")], [("⬅️ Dashboard", "home")]])
+            reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")], [("⬅️ Dashboard", "home")]])
         )
         return
 
@@ -1039,9 +1046,9 @@ async def digital_callback(update, context, action):
             await show_digital_payment(q, uid, product, gateways[0])
             return
         rows = [[(g["name"], f"digital_gateway_{product_id}::{g['id']}")] for g in gateways]
-        rows.append([("❌ Cancel | አቋርጥ", "digital_cancel")])
+        rows.append([(digital_template("digital_cancel_button", "❌ Cancel | አቋርጥ"), "digital_cancel")])
         set_pending(uid, "digital_choose_gateway", {"product_id": product_id})
-        await q.edit_message_text("Choose your payment method:", reply_markup=kb(rows))
+        await q.edit_message_text(digital_template("digital_choose_gateway_prompt", "💳 Choose your payment method:"), reply_markup=kb(rows))
         return
 
     if action.startswith("digital_gateway_"):
@@ -1104,7 +1111,7 @@ async def digital_callback(update, context, action):
             await q.edit_message_text("⛔ Admin access only."); return
         set_pending(uid, "digital_admin_wizard", {"mode":"add_product", "step":"id", "values":{}})
         await q.edit_message_text(
-            "➕ Add a product (step 1 of 9)\n\n"
+            "➕ Add a product (step 1 of 10)\n\n"
             "Send a short unique ID using English letters, numbers, and underscores.\nExample: gemini_pro_1m",
             reply_markup=kb([[("❌ Cancel", "admin_digital_products")]])
         )
@@ -1374,12 +1381,13 @@ async def show_digital_payment(q, uid, product, gateway):
         "warning": gateway["warning"] or "—",
     })
     text_body = render_digital_template(digital_template("digital_payment_template"), values)
+    text_body += "\n\n" + digital_template("digital_receipt_upload_prompt", "📸 After paying, upload a clear payment receipt screenshot as a photo or document.")
     set_pending(uid, "digital_receipt", {
         "product_id": product["id"], "gateway_id": gateway["id"],
         "product_name": product["name"], "duration_months": int(product["duration_months"]),
         "price": float(product["price"]), "gateway_name": gateway["name"],
     })
-    await q.edit_message_text(text_body, reply_markup=kb([[("❌ Cancel | አቋርጥ", "digital_cancel")]]))
+    await q.edit_message_text(text_body, reply_markup=kb([[(digital_template("digital_cancel_button", "❌ Cancel | አቋርጥ"), "digital_cancel")]]))
 
 
 async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1531,10 +1539,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📋 My listings","my_market")],
         ]
         for product in digital_products():
-            label = f"🌟 {product['name']} {product['duration_months']}m ({product['price']:g} ETB)"
+            label = render_digital_template(
+                digital_template("digital_market_product_button_template", "🌟 {name} · {duration} months · {price} ETB"),
+                {"name": product["name"], "duration": product["duration_months"], "price": f"{product['price']:g}"}
+            )
             rows.append([(label[:60], f"digital_product_{product['id']}")])
         rows.append([("⬅️ Dashboard","home")])
-        await q.edit_message_text("🛍 Marketplace — choose what you want to do:", reply_markup=kb(rows))
+        await q.edit_message_text(digital_template("digital_market_title", "🛍 Marketplace — choose what you want to do:"), reply_markup=kb(rows))
     elif action in ("buy_social","sell_social"):
         labels = {"buy_social":"buy a listed social-media service/asset",
                   "sell_social":"submit a social-media asset for review"}
@@ -1770,7 +1781,7 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         elif message.document:
             receipt_file_id, receipt_type = message.document.file_id, "document"
         else:
-            await message.reply_text("Please upload a receipt screenshot as a photo or document.")
+            await message.reply_text(digital_template("digital_receipt_upload_prompt", "📸 Please upload a clear receipt screenshot as a photo or document."))
             return
         with db() as c:
             reserved = c.execute(
@@ -1789,7 +1800,7 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             order_id = cur.lastrowid
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await message.reply_text(digital_template("digital_waiting_message", "Receipt received; waiting for admin review."))
+        await message.reply_text(digital_template("digital_order_submitted_message", digital_template("digital_waiting_message", "Receipt received; waiting for admin review.")))
         caption = (
             f"🌟 DIGITAL ORDER #{order_id}\nUser ID: {user.id}\nProduct: {order_product_name} "
             f"{order_duration}m\nPrice: {order_price:g} ETB\nGateway: {order_gateway_name}\n"
@@ -2170,8 +2181,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             vals = state.get("values",{})
             if step == "id":
                 import re
-                if not re.fullmatch(r"[A-Za-z0-9_]{2,48}", raw):
-                    await message.reply_text("Use 2–48 English letters, numbers, or underscores. Example: gemini_pro_1m")
+                if not re.fullmatch(r"[A-Za-z0-9_]{2,16}", raw):
+                    await message.reply_text("Use 2–16 English letters, numbers, or underscores. Example: gemini_pro_1m")
                     return
                 if digital_product(raw):
                     await message.reply_text("That ID already exists. Choose another unique ID, or edit the existing product.")
@@ -2251,8 +2262,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             vals = state.get("values",{})
             if step == "id":
                 import re
-                if not re.fullmatch(r"[A-Za-z0-9_]{2,48}", raw):
-                    await message.reply_text("Use 2–48 English letters, numbers, or underscores. Example: telebirr")
+                if not re.fullmatch(r"[A-Za-z0-9_]{2,16}", raw):
+                    await message.reply_text("Use 2–16 English letters, numbers, or underscores. Example: telebirr")
                     return
                 with db() as c:
                     exists = c.execute("SELECT 1 FROM digital_payment_gateways WHERE id=?", (raw,)).fetchone()
@@ -2354,7 +2365,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "digital_product_details_template", "digital_payment_template", "digital_waiting_message",
                 "digital_no_stock_message", "digital_no_gateway_message", "digital_cancel_message",
                 "digital_order_submitted_message", "digital_buy_button", "digital_cancel_button",
-                "digital_market_button", "digital_choose_gateway_prompt"
+                "digital_market_button", "digital_choose_gateway_prompt", "digital_market_title",
+                "digital_market_product_button_template", "digital_receipt_upload_prompt"
             }
             if key not in allowed:
                 with db() as c:
