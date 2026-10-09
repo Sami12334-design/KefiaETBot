@@ -962,7 +962,11 @@ async def show_digital_payment(q, uid, product, gateway):
         "warning": gateway["warning"] or "—",
     })
     text_body = render_digital_template(digital_template("digital_payment_template"), values)
-    set_pending(uid, "digital_receipt", {"product_id": product["id"], "gateway_id": gateway["id"]})
+    set_pending(uid, "digital_receipt", {
+        "product_id": product["id"], "gateway_id": gateway["id"],
+        "product_name": product["name"], "duration_months": int(product["duration_months"]),
+        "price": float(product["price"]), "gateway_name": gateway["name"],
+    })
     await q.edit_message_text(text_body, reply_markup=kb([[("❌ Cancel | አቋርጥ", "digital_cancel")]]))
 
 
@@ -1242,6 +1246,10 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         product = digital_product(state.get("product_id", ""))
         with db() as c:
             gateway = c.execute("SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (state.get("gateway_id", ""),)).fetchone()
+        order_product_name = str(state.get("product_name") or (product["name"] if product else ""))
+        order_duration = int(state.get("duration_months") or (product["duration_months"] if product else 1))
+        order_price = float(state.get("price", product["price"] if product else 0))
+        order_gateway_name = str(state.get("gateway_name") or (gateway["name"] if gateway else ""))
         if not product or not gateway or int(product["stock"]) <= 0:
             with db() as c:
                 c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
@@ -1266,15 +1274,15 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             cur = c.execute(
                 "INSERT INTO digital_orders(user_id,product_id,product_name,duration_months,price,gateway_id,gateway_name,receipt_file_id,receipt_type,status,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?,'pending_approval',?,?)",
-                (user.id, product["id"], product["name"], product["duration_months"], product["price"],
-                 gateway["id"], gateway["name"], receipt_file_id, receipt_type, now(), now())
+                (user.id, product["id"], order_product_name, order_duration, order_price,
+                 gateway["id"], order_gateway_name, receipt_file_id, receipt_type, now(), now())
             )
             order_id = cur.lastrowid
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
         await message.reply_text(digital_template("digital_waiting_message", "Receipt received; waiting for admin review."))
         caption = (
-            f"🌟 DIGITAL ORDER #{order_id}\nUser ID: {user.id}\nProduct: {product['name']} "
-            f"{product['duration_months']}m\nPrice: {product['price']:g} ETB\nGateway: {gateway['name']}\n"
+            f"🌟 DIGITAL ORDER #{order_id}\nUser ID: {user.id}\nProduct: {order_product_name} "
+            f"{order_duration}m\nPrice: {order_price:g} ETB\nGateway: {order_gateway_name}\n"
             "Status: Pending Approval"
         )
         configured_review_chat = digital_template("digital_admin_chat_id").strip()
