@@ -2373,11 +2373,21 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "own verified Telegram invite link, so the link itself cannot be edited.\n\n"
             "Available placeholders:\n"
             "{title} · {points} · {channel} · {completed_count} · {target} · {participants} · {status}\n\n"
-            "Maximum 3000 characters. Send /cancel to cancel.\n\n"
+            "Maximum 3000 characters. Use the Cancel button below to leave without saving.\n\n"
             "CURRENT TEMPLATE:\n" + template
         )
         set_pending(uid, "admin_task_message_template", {"task_id":tid})
-        await q.edit_message_text(prompt, reply_markup=kb([[("Cancel","admintask_view_" + str(tid))]]))
+        await q.edit_message_text(prompt, reply_markup=kb([[("Cancel","admintask_message_cancel_" + str(tid))]]))
+    elif action.startswith("admintask_message_cancel_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            tid = int(action.rsplit("_", 1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+        await q.edit_message_text("Message editing cancelled.", reply_markup=kb([[("📋 Review task",f"admintask_view_{tid}")],[("📋 Manage tasks","admin_tasks")]]))
     elif action.startswith("admintask_message_reset_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
