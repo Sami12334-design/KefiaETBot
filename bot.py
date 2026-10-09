@@ -1762,14 +1762,32 @@ async def digital_callback(update, context, action):
         if not order:
             await q.edit_message_text("Order not found.")
             return
-        await q.edit_message_text(
+        order_caption = (
             f"Digital order #{order_id}\nUser ID: {order['user_id']}\nProduct: {order['product_name']} "
             f"{order['duration_months']}m\nPrice: {order['price']:g} ETB\nPayment: {order['gateway_name']}\n"
-            f"Status: {order['status']}\nCreated: {order['created_at']}",
-            reply_markup=kb([[("✉️ Reply / Send redeem link", f"digital_reply_{order_id}")],
-                             [("🚫 Reject with message", f"digital_reject_{order_id}")],
-                             [("⬅️ Pending orders", "admin_digital_orders")]])
+            f"Status: {order['status']}\nCreated: {order['created_at']}"
         )
+        order_markup = kb([[("✉️ Reply / Send redeem link", f"digital_reply_{order_id}")],
+                           [("🚫 Reject with message", f"digital_reject_{order_id}")],
+                           [("⬅️ Pending orders", "admin_digital_orders")]])
+        # Keep the actual customer receipt attached to the review details.
+        # If opened from a text-only order list, send the saved receipt as a new media message.
+        if q.message.photo or q.message.document:
+            await q.edit_message_caption(caption=order_caption, reply_markup=order_markup)
+        elif order["receipt_type"] == "photo":
+            await context.bot.send_photo(
+                chat_id=q.message.chat_id,
+                photo=order["receipt_file_id"],
+                caption=order_caption,
+                reply_markup=order_markup,
+            )
+        else:
+            await context.bot.send_document(
+                chat_id=q.message.chat_id,
+                document=order["receipt_file_id"],
+                caption=order_caption,
+                reply_markup=order_markup,
+            )
         return
 
     if action.startswith(("digital_reply_", "digital_reject_")):
