@@ -1182,8 +1182,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ):
         await digital_callback(update, context, action)
         return
-    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders") or action.startswith((
-        "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_",
+    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders", "buy_usdt_continue_destination") or action.startswith((
+        "buy_usdt_gateway_", "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_",
         "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_"
     )):
         await crypto_callback(update, context, action)
