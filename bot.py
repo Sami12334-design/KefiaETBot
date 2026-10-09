@@ -82,6 +82,17 @@ def init_db():
           details TEXT NOT NULL, duration TEXT, quoted_price REAL, receipt TEXT,
           status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS promoter_profiles(
+          user_id INTEGER PRIMARY KEY, method TEXT NOT NULL, account_number TEXT NOT NULL,
+          account_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+          target_count INTEGER NOT NULL DEFAULT 100, points_per_join INTEGER NOT NULL DEFAULT 1,
+          completed_count INTEGER NOT NULL DEFAULT 0, invite_link TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS promoter_join_events(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, promoter_user_id INTEGER NOT NULL,
+          joined_user_id INTEGER NOT NULL UNIQUE, invite_link TEXT NOT NULL, joined_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS market_listings(
           id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, action TEXT NOT NULL,
           asset_type TEXT NOT NULL, details TEXT NOT NULL, amount TEXT, price REAL,
@@ -183,7 +194,12 @@ def init_db():
             ("digital_market_product_button_template", "🌟 {name} · {duration} months · {price} ETB · stock {stock}"),
             ("digital_receipt_upload_prompt", "📸 After paying, upload a clear payment receipt screenshot as a photo or document."),
             ("digital_product_details_template", "🌟 {name} {duration}m\n\n💰 Price: {price} ETB each\n📦 In stock: {stock}\n\n📝 DESCRIPTION\n{description}\n\n✨ FEATURES\n{features}\n\n📌 Important Note:\n{note}\n\n🚨 NOTICE\n{notice}\n\n🎯 Price: {price} ETB / unit\n🛡️ Warranty: {warranty}\n\nTap Buy now when you are ready."),
-            ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}")
+            ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}"),
+            ("promoter_rules", "📣 PROMOTER PROGRAM RULES\n\n1. Share only your unique invite link provided by KefiaETBot.\n2. Only real, unique people who join the configured channel through your link count.\n3. Self-joins, duplicate accounts, fake members, and paid/fraudulent joins do not count.\n4. Your progress and points are tracked by the bot.\n5. Once you reach the campaign target and the minimum points requirement, you may request a withdrawal.\n6. Provide accurate Telebirr or CBE account details. Admins verify activity and payments.\n7. Do not spam or mislead people. Violations may result in disqualification.\n\nTap Agree & Confirm only if you accept these rules."),
+            ("promoter_channel", ""),
+            ("promoter_target", "100"),
+            ("promoter_points_per_join", "1"),
+            ("promoter_min_withdraw_points", "100"),
         ):
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key,value))
 
@@ -1519,21 +1535,96 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
             minimum = c.execute("SELECT value FROM settings WHERE key='min_withdraw_points'").fetchone()
+            promoter = c.execute("SELECT * FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
         minimum_points = int(minimum["value"]) if minimum else 1000
         points = u["points"] if u else 0
+        if promoter and int(promoter["completed_count"]) < int(promoter["target_count"]):
+            await q.edit_message_text(f"🔒 Promoter withdrawal is locked until you reach your target.\n\nVerified joins: {promoter['completed_count']}/{promoter['target_count']}\nPoints in wallet: {points}\n\nShare your unique referral link with real people, then check your progress again.", reply_markup=kb([[("🔗 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]])); return
         if points < minimum_points:
             await q.edit_message_text(f"💸 Withdrawal unavailable yet.\nYour points: {points}\nMinimum: {minimum_points} points.\nAdmins can change this limit.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
+        if promoter:
+            if not promoter["account_number"] or not promoter["account_name"]:
+                await q.edit_message_text("Your payout details are incomplete. Please contact an admin.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")]])); return
+            payout_details = f"{promoter['account_number']} | {promoter['account_name']}"
+            with db() as c:
+                cur = c.execute("INSERT INTO withdrawals(user_id,points,payout_method,payout_details,created_at) VALUES(?,?,?,?,?)", (uid,points,promoter["method"],payout_details,now()))
+                withdrawal_id = cur.lastrowid
+                c.execute("UPDATE users SET points=0 WHERE user_id=?", (uid,))
+            await q.edit_message_text(f"✅ Withdrawal request #{withdrawal_id} submitted!\nPoints requested: {points}\nMethod: {promoter['method']}\nAccount: {promoter['account_number']}\nName: {promoter['account_name']}\n\nAdmins will review and contact you after processing.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]]))
+            await notify_admins(context, f"💸 PROMOTER WITHDRAWAL #{withdrawal_id}\nUser: {uid}\nPoints: {points}\nMethod: {promoter['method']}\nAccount: {promoter['account_number']}\nAccount holder: {promoter['account_name']}\nTarget: {promoter['completed_count']}/{promoter['target_count']}")
+            return
         with db() as c:
             c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'withdraw','') ON CONFLICT(user_id) DO UPDATE SET action='withdraw',data=''", (uid,))
         await q.edit_message_text("Enter withdrawal method and details in one message (example: Telebirr, account/phone). Your request will be reviewed by an admin.", reply_markup=kb([[("Cancel","home")]]))
     elif action == "ads":
-        await q.edit_message_text("📣 Promotion Center\nChoose a promotion service:", reply_markup=kb([
+        await q.edit_message_text("📣 Promotion / Ads Center\n\nChoose what you want to do:", reply_markup=kb([
+            [("📢 ቻናል አለኝ፣ ማስተዋወቅ እፈልጋለሁ (Promoter)","promoter_start")],
+            [("🛍 ምርቴን ማስታወቅ እፈልጋለሁ (Advertiser)","advertiser_start")],
+            [("📊 My promoter progress","promoter_stats")],
+            [("📋 My ad requests","my_ads")],
+            [("⬅️ Dashboard","home")]
+        ]))
+    elif action == "advertiser_start":
+        await q.edit_message_text("🛍 Advertiser Center\nChoose what you want to promote:", reply_markup=kb([
             [("🚀 Promote my product","ad_product")],
             [("👥 Get channel members","ad_members")],
             [("👁️ Get views / reach","ad_views")],
             [("📋 My ad requests","my_ads")],
-            [("⬅️ Dashboard","home")]
+            [("⬅️ Promotion Center","ads")]
         ]))
+    elif action == "promoter_start":
+        with db() as c:
+            existing_profile = c.execute("SELECT user_id FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
+        if existing_profile:
+            await q.edit_message_text("You already have a promoter profile. Open your progress dashboard to view your saved payout details and referral link.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Promotion Center","ads")]]))
+            return
+        channel = setting_value("promoter_channel", "").strip()
+        try:
+            target = max(1, int(setting_value("promoter_target", "100")))
+            points = max(1, int(setting_value("promoter_points_per_join", "1")))
+        except (TypeError, ValueError):
+            target, points = 100, 1
+        if not channel:
+            await q.edit_message_text("⏳ The promoter campaign is not configured yet. Please check back later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]]))
+            return
+        rules = setting_value("promoter_rules", "Please follow the campaign rules.")
+        await q.edit_message_text(
+            f"{rules}\n\n📌 Current campaign target: {target} verified joins\n🎁 Reward: {points} points per verified join\n\nDo you agree to these rules and want to continue?",
+            reply_markup=kb([[("✅ Agree & Confirm","promoter_agree")],[("❌ I don't agree","ads")]])
+        )
+    elif action == "promoter_agree":
+        channel = setting_value("promoter_channel", "").strip()
+        if not channel:
+            await q.edit_message_text("The promoter campaign is temporarily unavailable. Please try again later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]]))
+            return
+        with db() as c:
+            c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'promoter_choose_method','{}') ON CONFLICT(user_id) DO UPDATE SET action='promoter_choose_method',data='{}'", (uid,))
+        await q.edit_message_text("✅ Rules accepted.\n\nChoose where you want to receive your promoter payout:", reply_markup=kb([[("📱 Telebirr","promoter_method_telebirr")],[("🏦 CBE","promoter_method_cbe")],[("❌ Cancel","ads")]]))
+    elif action in ("promoter_method_telebirr","promoter_method_cbe"):
+        method = "Telebirr" if action.endswith("telebirr") else "CBE"
+        set_pending(uid, "promoter_account_number", {"method": method})
+        await q.edit_message_text(f"💳 Payout method: {method}\n\nSend your {method} account/phone number. This is saved privately for admin payout processing.", reply_markup=kb([[("❌ Cancel","ads")]]))
+    elif action == "promoter_stats":
+        with db() as c:
+            profile = c.execute("SELECT * FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
+            joined = c.execute("SELECT COUNT(*) n FROM promoter_join_events WHERE promoter_user_id=?", (uid,)).fetchone()["n"]
+            wallet_row = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
+            wallet_points = wallet_row["points"] if wallet_row else 0
+        if not profile:
+            await q.edit_message_text("📊 You haven't registered for the promoter program yet. Tap Start promoter to read the rules and register.", reply_markup=kb([[("📢 Start promoter","promoter_start")],[("⬅️ Promotion Center","ads")]]))
+            return
+        target = int(profile["target_count"])
+        completed = int(profile["completed_count"])
+        points_earned = joined * int(profile["points_per_join"])
+        msg = (f"📊 YOUR PROMOTER DASHBOARD\n\nStatus: {profile['status'].replace('_',' ').title()}\n"
+               f"Verified joins: {completed}/{target}\nPoints earned from tracked joins: {points_earned}\n"
+               f"Wallet balance: {wallet_points} points\nRemaining to target: {max(0,target-completed)}\nPayout method: {profile['method']}\n"
+               f"Account number: {profile['account_number']}\nAccount holder: {profile['account_name']}\n")
+        if profile["invite_link"]:
+            msg += f"\n🔗 Your unique channel referral link:\n{profile['invite_link']}\n\nShare this link with real people. Only verified unique joins count."
+        if completed >= target:
+            msg += "\n\n🎉 Target reached! If your wallet meets the minimum points requirement, you can request withdrawal."
+        await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress","promoter_stats")],[("💸 Withdraw points","withdraw")],[("⬅️ Promotion Center","ads")]]))
     elif action in ("ad_product","ad_members","ad_views"):
         labels = {"ad_product":"Product promotion","ad_members":"Channel member campaign","ad_views":"Views / reach campaign"}
         with db() as c:
@@ -1578,6 +1669,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
             [("🌟 Gemini Pro & Products","admin_digital_products")],
+            [("📣 Promoter Program","admin_promoters")],
             [("⬅️ Dashboard","home")]
         ]))
     elif action == "admin_new_task":
@@ -1686,6 +1778,110 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours.",
             reply_markup=kb([[("❌ Cancel","admin_settings")]])
         )
+    elif action == "admin_promoters":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        rules = setting_value("promoter_rules", "")
+        channel = setting_value("promoter_channel", "Not set")
+        target = setting_value("promoter_target", "100")
+        points = setting_value("promoter_points_per_join", "1")
+        await q.edit_message_text(
+            f"📣 PROMOTER PROGRAM SETTINGS\n\nChannel: {channel or 'Not set'}\nTarget per promoter: {target} verified joins\nPoints per join: {points}\nRules preview: {rules[:250]}",
+            reply_markup=kb([
+                [("✏️ Edit rules","admin_promoter_set_rules")],
+                [("📡 Set referral channel","admin_promoter_set_channel")],
+                [("🎯 Set target audience","admin_promoter_set_target")],
+                [("⭐ Set points per join","admin_promoter_set_points")],
+                [("👥 View promoter users","admin_promoter_users")],
+                [("⬅️ Admin Dashboard","admin")]
+            ])
+        )
+    elif action.startswith("admin_promoter_set_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        field = action.removeprefix("admin_promoter_set_")
+        labels = {"rules":"campaign rules/instructions","channel":"target channel username or ID","target":"target number of verified joins per promoter","points":"points rewarded per verified join"}
+        if field not in labels:
+            await q.edit_message_text("Setting not found.", reply_markup=kb([[("⬅️ Promoter Program","admin_promoters")]])); return
+        set_pending(uid, "admin_promoter_setting", {"field":field})
+        current = setting_value("promoter_"+field, "Not set")
+        await q.edit_message_text(
+            f"✏️ Update promoter {labels[field]}\n\nCurrent value: {str(current)[:700]}\n\nSend the new value in one message. For the channel, the bot must be an administrator with invite-link permission. For target/points, enter a positive whole number.",
+            reply_markup=kb([[("❌ Cancel","admin_promoters")]])
+        )
+    elif action == "admin_promoter_users":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            profiles = c.execute("SELECT user_id,status,completed_count,target_count,method FROM promoter_profiles ORDER BY updated_at DESC LIMIT 20").fetchall()
+        rows = [[(f"{p['user_id']} · {p['completed_count']}/{p['target_count']} · {p['status']}", f"admin_promoter_user_{p['user_id']}")] for p in profiles]
+        rows.extend([[("🔄 Refresh","admin_promoter_users")],[("⬅️ Promoter Program","admin_promoters")],[("⬅️ Admin Dashboard","admin")]])
+        await q.edit_message_text("👥 Promoter users\nChoose a user to view their saved payout information, progress, and send them a message:", reply_markup=kb(rows))
+    elif action.startswith("admin_promoter_user_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: promoter_uid = int(action.removeprefix("admin_promoter_user_"))
+        except ValueError:
+            await q.edit_message_text("Invalid promoter user ID."); return
+        with db() as c:
+            profile = c.execute("SELECT * FROM promoter_profiles WHERE user_id=?", (promoter_uid,)).fetchone()
+            user_row = c.execute("SELECT username,first_name,points FROM users WHERE user_id=?", (promoter_uid,)).fetchone()
+            joined = c.execute("SELECT COUNT(*) n FROM promoter_join_events WHERE promoter_user_id=?", (promoter_uid,)).fetchone()["n"]
+        if not profile:
+            await q.edit_message_text("Promoter profile not found.", reply_markup=kb([[("⬅️ Promoter users","admin_promoter_users")]])); return
+        msg = (f"👤 PROMOTER PROFILE\nUser ID: {promoter_uid}\nName: {(user_row['first_name'] or '—') if user_row else '—'}\n"
+               f"Username: @{user_row['username'] if user_row and user_row['username'] else '—'}\nWallet points: {user_row['points'] if user_row else 0}\n"
+               f"Status: {profile['status']}\nProgress: {profile['completed_count']}/{profile['target_count']}\n"
+               f"Tracked joins: {joined}\nPoints per join: {profile['points_per_join']}\nPayout: {profile['method']}\n"
+               f"Account number: {profile['account_number']}\nAccount holder: {profile['account_name']}\nInvite link: {profile['invite_link'] or 'Not created'}")
+        await q.edit_message_text(msg, reply_markup=kb([
+            [("💬 Message user",f"admin_promoter_message_{promoter_uid}")],
+            [("✏️ Edit payout method",f"admin_promoter_edit_method_{promoter_uid}")],
+            [("✏️ Edit account number",f"admin_promoter_edit_number_{promoter_uid}")],
+            [("✏️ Edit account holder",f"admin_promoter_edit_name_{promoter_uid}")],
+            [("🔗 Refresh invite link",f"admin_promoter_refresh_{promoter_uid}")],
+            [("⬅️ Promoter users","admin_promoter_users")]
+        ]))
+    elif action.startswith("admin_promoter_edit_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        parts = action.split("_")
+        if len(parts) < 5:
+            await q.edit_message_text("Invalid edit action."); return
+        field = parts[3]
+        promoter_uid = parts[4]
+        field_map = {"method":"method","number":"account_number","name":"account_name"}
+        if field not in field_map or not promoter_uid.isdigit():
+            await q.edit_message_text("Invalid payout field."); return
+        set_pending(uid, "admin_promoter_edit_payout", {"user_id":int(promoter_uid),"field":field_map[field]})
+        prompt = "Send Telebirr or CBE." if field == "method" else ("Send the new account/phone number." if field == "number" else "Send the new account-holder name.")
+        await q.edit_message_text(f"✏️ Edit promoter {field}\n\n{prompt}", reply_markup=kb([[("❌ Cancel",f"admin_promoter_user_{promoter_uid}")]]))
+    elif action.startswith("admin_promoter_refresh_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: promoter_uid = int(action.removeprefix("admin_promoter_refresh_"))
+        except ValueError:
+            await q.edit_message_text("Invalid user ID."); return
+        channel = setting_value("promoter_channel", "").strip()
+        if not channel:
+            await q.edit_message_text("Set the promoter referral channel first.", reply_markup=kb([[("⬅️ Promoter Program","admin_promoters")]])); return
+        try:
+            link_obj = await context.bot.create_chat_invite_link(chat_id=channel, name=f"kefia-promoter-{promoter_uid}")
+            with db() as c:
+                c.execute("UPDATE promoter_profiles SET invite_link=?,status=CASE WHEN completed_count>=target_count THEN 'completed' ELSE 'active' END,updated_at=? WHERE user_id=?", (link_obj.invite_link,now(),promoter_uid))
+            await context.bot.send_message(promoter_uid, f"🔗 Your promoter referral link is ready:\n{link_obj.invite_link}\n\nShare it with real people and track your progress with 📊 My promoter progress.")
+            await q.edit_message_text("✅ Invite link refreshed and sent to the promoter.", reply_markup=kb([[("👤 Promoter profile",f"admin_promoter_user_{promoter_uid}")],[("⬅️ Promoter users","admin_promoter_users")]]))
+        except Exception as exc:
+            log.warning("Could not refresh promoter invite link: %s", exc)
+            await q.edit_message_text("Could not create the link. Check that the bot is an admin in the configured channel and can invite users.", reply_markup=kb([[("👤 Promoter profile",f"admin_promoter_user_{promoter_uid}")]]))
+    elif action.startswith("admin_promoter_message_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: promoter_uid = int(action.removeprefix("admin_promoter_message_"))
+        except ValueError:
+            await q.edit_message_text("Invalid user ID."); return
+        set_pending(uid, "admin_promoter_message", {"user_id":promoter_uid})
+        await q.edit_message_text(f"💬 Send the message you want to deliver to promoter {promoter_uid}.", reply_markup=kb([[("❌ Cancel",f"admin_promoter_user_{promoter_uid}")]]))
     elif action == "admin_queue":
         if not is_admin(uid): return
         with db() as c:
