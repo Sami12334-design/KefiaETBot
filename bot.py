@@ -2348,7 +2348,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("✏️ Edit title","admintask_edit_title_" + str(tid)),("📣 Edit channel","admintask_edit_channel_" + str(tid))],
             [("🎯 Edit target","admintask_edit_target_" + str(tid)),("💰 Edit reward","admintask_edit_points_" + str(tid))],
             [("👥 Edit user limit","admintask_edit_limit_" + str(tid))],
-            [("✍️ Edit customer message","admintask_message_edit_" + str(tid)),("♻️ Reset message","admintask_message_reset_" + str(tid))],
+            [("✍️ Edit full task message (link protected)","admintask_message_edit_" + str(tid)),("♻️ Reset message","admintask_message_reset_" + str(tid))],
             [("🏆 Task leaderboard","admintask_leaderboard_" + str(tid))],
             [("⏸ Pause / Resume","admintask_toggle_" + str(tid)),("🗑 Remove","admintask_delete_confirm_" + str(tid))],
             [("⬅️ All tasks","admin_tasks")]
@@ -2368,9 +2368,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         template = setting_value(f"task_message_template_{tid}", default_task_message_template())
         prompt = (
             f"✍️ EDIT CUSTOMER MESSAGE · TASK #{tid} — {task['title']}\n\n"
-            "Send the complete message template you want users to see. Keep "
-            "{{PERSONAL_INVITE_LINK}} exactly once; the bot replaces it with each user's "
-            "own verified Telegram invite link, so the link itself cannot be edited.\n\n"
+            "You can edit the full customer-facing task message: headings, emojis, reward text, channel line, progress/status wording, and sharing instructions. "
+            "Keep {{PERSONAL_INVITE_LINK}} exactly once; the bot automatically inserts each user's own personal invite link there. "
+            "That marker/link is protected and must not be changed or removed.\n\n"
             "Available placeholders:\n"
             "{title} · {points} · {channel} · {completed_count} · {target} · {participants} · {status}\n\n"
             "Maximum 3000 characters. Use the Cancel button below to leave without saving.\n\n"
