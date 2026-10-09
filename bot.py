@@ -802,7 +802,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🛍 Marketplace — choose what you want to do:", reply_markup=kb([
             [("🛒 Buy USDT","buy_usdt")],
             [("📲 Buy social-media promotion/accounts","buy_social")],
-            [("💱 Sell USDT","sell_usdt")],
+            [("💸 Sell USDT | USDT ይሽጡ","sell_usdt")],
             [("📤 Sell a social-media asset","sell_social")],
             [("📋 My listings","my_market")],
             [("⬅️ Dashboard","home")]
