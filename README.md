@@ -32,6 +32,7 @@ KefiaETBot is a Telegram bot MVP for admin-managed task campaigns, referral trac
 - `/set price_ad_product 500`
 - `/set price_ad_members 300`
 - `/set price_ad_views 200`
+- `/set referral_points 20` — optional one-time reward for a newly registered user joining through an existing user's invite link.
 - `/quote_ad REQUEST_ID PRICE_ETB PAYMENT_INSTRUCTIONS` — send an ad quote to the request owner (admins only).
 - `/receipt AD_REQUEST_ID` — a user submits a payment screenshot/document or transaction reference for a quoted ad.
 - `/myads` — list your recent ad requests and their statuses.
