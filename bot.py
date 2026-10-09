@@ -653,7 +653,7 @@ async def crypto_callback(update, context, action):
             f"🪙 Crypto order #{order['id']}\nSide: {order['side'].upper()}\n"
             f"User: {order['user_id']}\nAmount: {order['amount_usdt']:g} USDT\n"
             f"ETB total: {order['total_etb']:g}\nMethod: {method}\nDestination/details: {details}\n"
-            f"Status: {order['status']}"
+            f"Receiving destination: {order['transfer_destination'] or '—'}\nStatus: {order['status']}"
         )
         rows = []
         if order["status"] == "pending_admin_approval":
@@ -1360,12 +1360,16 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             settings = c.execute("SELECT key,value FROM settings ORDER BY key").fetchall()
         msg = "⚙️ Current settings\n" + ("\n".join(f"{r['key']} = {r['value']}" for r in settings) if settings else "No custom settings configured.")
         msg += ("\n\nUse /set KEY VALUE to update settings. Crypto examples:\n"
-                "/set buy_usdt_rate_1_2 150\n/set buy_usdt_rate_2_5 148\n/set buy_usdt_rate_5_plus 145\n"
-                "/set buy_payment_cbe_enabled true\n/set buy_payment_cbe_details CBE account details here\n"
-                "/set sell_payout_telebirr_enabled true\n/set sell_network_bsc_enabled true\n"
-                "/set sell_network_bsc_destination YOUR_ADDRESS\n/set buy_enabled false\n"
-                "/set buy_unavailable_message Currently unavailable\n"
-                "Use value 'none' to clear an unavailable message. See the admin docs/code for supported setting keys.")
+                "/set buy_usdt_stock 100\n/set buy_usdt_rate 150\n/set buy_usdt_min 1\n/set buy_usdt_max 500\n"
+                "/set buy_usdt_bep20_min 10\n/set buy_usdt_bybit_min 5\n/set buy_usdt_processing_time 1-2 hours\n"
+                "/set buy_payment_telebirr_enabled true\n/set buy_payment_telebirr_icon 📱\n"
+                "/set buy_payment_telebirr_name Telebirr\n/set buy_payment_telebirr_number YOUR_NUMBER\n"
+                "/set buy_payment_telebirr_account_name YOUR_ACCOUNT_NAME\n/set buy_payment_telebirr_receipt_amharic YOUR_AMHARIC_TEXT\n"
+                "/set buy_payment_telebirr_after_payment YOUR_ENGLISH_TEXT\n/set buy_payment_telebirr_warning YOUR_WARNING\n"
+                "/set buy_usdt_admin_chat_id YOUR_NUMERIC_GROUP_ID\n"
+                "Edit all Buy USDT text templates with /set buy_usdt_*_template TEXT and error messages with their buy_usdt_* keys. "
+                "Payment fields use buy_payment_METHOD_name/icon/number/account_name/receipt_amharic/after_payment/warning. "
+                "All numeric examples are placeholders; configure actual values before enabling sales.")
         await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Admin Dashboard","admin")]]))
     elif action == "admin_queue":
         if not is_admin(uid): return
@@ -1555,7 +1559,8 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         if order["side"] == "buy":
             vals = buy_usdt_values(amount=Decimal(str(order["amount_usdt"])), total=Decimal(str(order["total_etb"])),
                                    order_id=order_id, user_id=user.id, destination=order["transfer_destination"] or "",
-                                   gateway={"name": order["payment_method"] or ""})
+                                   gateway=buy_usdt_gateway(order["payment_method"] or ""))
+            vals["rate"] = f"{order['rate_etb']:g}"
             await message.reply_text(render_digital_template(setting_value("buy_usdt_confirmation_template", ""), vals))
             caption = render_digital_template(setting_value("buy_usdt_admin_order_template", ""), vals)
         else:
