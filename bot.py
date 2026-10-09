@@ -173,7 +173,7 @@ def init_db():
             ("digital_market_button", "⬅️ Marketplace"),
             ("digital_choose_gateway_prompt", "💳 Choose your payment method:"),
             ("digital_market_title", "🛍 Marketplace — choose what you want to do:"),
-            ("digital_market_product_button_template", "🌟 {name} · {duration} months · {price} ETB"),
+            ("digital_market_product_button_template", "🌟 {name} · {duration} months · {price} ETB · stock {stock}"),
             ("digital_receipt_upload_prompt", "📸 After paying, upload a clear payment receipt screenshot as a photo or document."),
             ("digital_product_details_template", "🌟 {name} {duration}m\n\n💰 Price: {price} ETB each\n📦 In stock: {stock}\n\n📝 DESCRIPTION\n{description}\n\n✨ FEATURES\n{features}\n\n📌 Important Note:\n{note}\n\n🚨 NOTICE\n{notice}\n\n🎯 Price: {price} ETB / unit\n🛡️ Warranty: {warranty}\n\nTap Buy now when you are ready."),
             ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}")
@@ -1031,16 +1031,16 @@ async def digital_callback(update, context, action):
         product = digital_product(product_id)
         if not product or not product["active"]:
             await q.edit_message_text(digital_template("digital_no_stock_message", "Product unavailable."),
-                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+                                      reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")]]))
             return
         if int(product["stock"]) <= 0:
             await q.edit_message_text(digital_template("digital_no_stock_message", "This product is out of stock."),
-                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+                                      reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")]]))
             return
         gateways = digital_gateways()
         if not gateways:
             await q.edit_message_text(digital_template("digital_no_gateway_message", "Payment unavailable."),
-                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+                                      reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")]]))
             return
         if len(gateways) == 1:
             await show_digital_payment(q, uid, product, gateways[0])
@@ -1062,7 +1062,7 @@ async def digital_callback(update, context, action):
             gateway = c.execute("SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (gateway_id,)).fetchone()
         if not product or not gateway or int(product["stock"]) <= 0:
             await q.edit_message_text(digital_template("digital_no_stock_message", "Product or payment option unavailable."),
-                                      reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+                                      reply_markup=kb([[(digital_template("digital_market_button", "⬅️ Marketplace"), "market")]]))
             return
         await show_digital_payment(q, uid, product, gateway)
         return
@@ -1328,7 +1328,8 @@ async def digital_callback(update, context, action):
         rows = [[(f"Order #{o['id']} · {o['product_name']} {o['duration_months']}m · {o['price']:g} ETB · user {o['user_id']}",
                   f"digital_order_view_{o['id']}")] for o in orders]
         rows.append([("⬅️ Digital Products", "admin_digital_products")])
-        await q.edit_message_text("Pending digital-goods orders:", reply_markup=kb(rows))
+        heading = "📥 Pending orders — choose an order to review:" if orders else "✅ No pending digital orders right now. New receipt submissions will appear here."
+        await q.edit_message_text(heading, reply_markup=kb(rows))
         return
 
     if action.startswith("digital_order_view_"):
@@ -1541,7 +1542,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for product in digital_products():
             label = render_digital_template(
                 digital_template("digital_market_product_button_template", "🌟 {name} · {duration} months · {price} ETB"),
-                {"name": product["name"], "duration": product["duration_months"], "price": f"{product['price']:g}"}
+                {"name": product["name"], "duration": product["duration_months"], "price": f"{product['price']:g}", "stock": product["stock"]}
             )
             rows.append([(label[:60], f"digital_product_{product['id']}")])
         rows.append([("⬅️ Dashboard","home")])
