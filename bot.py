@@ -203,8 +203,10 @@ def migrate_legacy_sqlite(c):
             ).fetchall()
         ]
         if not source_tables:
-            log.warning("Legacy SQLite file has no application tables; no records imported.")
-            return
+            raise RuntimeError(
+                "Legacy SQLite file at %s has no application tables; refusing to start with an empty PostgreSQL database."
+                % DB_PATH
+            )
         auto_id_tables = (
             "tasks", "task_claims", "invite_events", "ad_requests",
             "promoter_join_events", "market_listings", "withdrawals",
