@@ -2019,6 +2019,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
         with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action IN ('admin_market_edit','admin_market_message')", (uid,))
             items = c.execute("SELECT id,asset_type,status,listing_active,price,purchase_status FROM market_listings WHERE action='sell_social' ORDER BY id DESC LIMIT 25").fetchall()
         rows = []
         for item in items:
@@ -2030,6 +2031,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action.startswith("admin_market_item_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action IN ('admin_market_edit','admin_market_message')", (uid,))
         try: listing_id = int(action.removeprefix("admin_market_item_"))
         except ValueError:
             await q.edit_message_text("Invalid listing."); return
@@ -2053,6 +2056,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append([("💬 Message buyer",f"admin_market_message_{listing_id}_buyer")])
         if item["receipt_file_id"]:
             rows.append([("🧾 Resend receipt to admin",f"admin_market_receipt_{listing_id}")])
+        if item["purchase_status"] == "receipt_submitted":
+            rows.append([("✅ Approve purchase",f"admin_market_purchase_approve_{listing_id}"),("❌ Reject purchase",f"admin_market_purchase_reject_{listing_id}")])
         rows.extend([[("⬅️ All listings","admin_marketplace")],[("⬅️ Admin Dashboard","admin")]])
         await q.edit_message_text(msg, reply_markup=kb(rows))
     elif action.startswith("admin_market_price_") or action.startswith("admin_market_desc_"):
@@ -2103,6 +2108,34 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("This listing has no such recipient.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")]])); return
         set_pending(uid,"admin_market_message",{"listing_id":listing_id,"target_user_id":target_user,"recipient_role":recipient_role})
         await q.edit_message_text(f"💬 Send a text message or upload a photo/document to the {recipient_role} of listing #{listing_id}.", reply_markup=kb([[("❌ Cancel",f"admin_market_item_{listing_id}")]]))
+    elif action.startswith("admin_market_purchase_approve_") or action.startswith("admin_market_purchase_reject_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        approved = action.startswith("admin_market_purchase_approve_")
+        prefix = "admin_market_purchase_approve_" if approved else "admin_market_purchase_reject_"
+        try: listing_id = int(action.removeprefix(prefix))
+        except ValueError:
+            await q.edit_message_text("Invalid purchase."); return
+        with db() as c:
+            item = c.execute("SELECT * FROM market_listings WHERE id=? AND action='sell_social' AND purchase_status='receipt_submitted'", (listing_id,)).fetchone()
+            if item:
+                if approved:
+                    c.execute("UPDATE market_listings SET purchase_status='sold',listing_active=0 WHERE id=?", (listing_id,))
+                else:
+                    c.execute("UPDATE market_listings SET purchase_status='available',buyer_user_id=NULL,payment_method='' WHERE id=?", (listing_id,))
+        if not item:
+            await q.edit_message_text("This purchase is no longer awaiting review.", reply_markup=kb([[("⬅️ Social account listings","admin_marketplace")]])); return
+        if approved:
+            buyer_message = f"✅ Payment verified for social account #{listing_id}. An admin will contact you about the next steps for the account transfer. Please do not share passwords or one-time codes in chat."
+            seller_message = f"🎉 Your social account listing #{listing_id} has a buyer and the payment was marked verified by an admin. An admin will contact you about the transfer."
+        else:
+            buyer_message = f"⚠️ Payment for social account #{listing_id} could not be approved. Please contact an admin before trying again."
+            seller_message = f"ℹ️ The purchase attempt for your social account listing #{listing_id} was not approved. The listing is available again."
+        for target_uid, notice in ((item["buyer_user_id"],buyer_message),(item["user_id"],seller_message)):
+            if target_uid:
+                try: await context.bot.send_message(target_uid,notice)
+                except Exception: log.warning("Could not notify user %s about marketplace purchase %s",target_uid,listing_id)
+        await q.edit_message_text("✅ Purchase marked verified. Listing marked sold." if approved else "Purchase rejected; listing is available again.", reply_markup=kb([[("👤 Listing details",f"admin_market_item_{listing_id}")],[("⬅️ All listings","admin_marketplace")]]))
     elif action.startswith("admin_market_receipt_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
