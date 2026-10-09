@@ -871,6 +871,7 @@ async def digital_callback(update, context, action):
             "/gateway_set ID | NAME | ACCOUNT_NUMBER | ACCOUNT_NAME | INSTRUCTIONS | WARNING\n"
             "/gateway_toggle ID true/false\n"
             "/digital_waiting MESSAGE\n"
+            "/digital_admin_chat CHAT_ID (optional review group/channel; use /digital_admin_chat none to clear)\n"
             "/digital_text KEY MESSAGE (edit templates/messages)\n"
             "For multi-line values, use the command and separate fields with | where supported."
         )
@@ -1276,15 +1277,21 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             f"{product['duration_months']}m\nPrice: {product['price']:g} ETB\nGateway: {gateway['name']}\n"
             "Status: Pending Approval"
         )
-        for aid in ADMIN_IDS:
+        configured_review_chat = digital_template("digital_admin_chat_id").strip()
+        try:
+            review_targets = [int(configured_review_chat)] if configured_review_chat else sorted(ADMIN_IDS)
+        except ValueError:
+            review_targets = sorted(ADMIN_IDS)
+            log.error("Invalid digital_admin_chat_id; falling back to private admin chats")
+        for target_chat in review_targets:
             try:
                 markup = kb([[(f"Review order #{order_id}", f"digital_order_view_{order_id}")]])
                 if receipt_type == "photo":
-                    await context.bot.send_photo(aid, receipt_file_id, caption=caption, reply_markup=markup)
+                    await context.bot.send_photo(target_chat, receipt_file_id, caption=caption, reply_markup=markup)
                 else:
-                    await context.bot.send_document(aid, receipt_file_id, caption=caption, reply_markup=markup)
+                    await context.bot.send_document(target_chat, receipt_file_id, caption=caption, reply_markup=markup)
             except Exception:
-                log.exception("Could not forward digital order %s receipt to admin %s", order_id, aid)
+                log.exception("Could not forward digital order %s receipt to review chat %s", order_id, target_chat)
         return
     with db() as c:
         pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
@@ -1543,6 +1550,22 @@ async def handle_digital_admin_command(update, context, value):
         with db() as c:
             c.execute("INSERT INTO settings(key,value) VALUES('digital_waiting_message',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_text,))
         await msg.reply_text("Digital-order waiting message updated.")
+        return True
+    if value.startswith("/digital_admin_chat "):
+        chat_value = value[len("/digital_admin_chat "):].strip()
+        try:
+            int(chat_value)
+        except ValueError:
+            await msg.reply_text("Provide a numeric Telegram user, group, or channel chat ID.")
+            return True
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('digital_admin_chat_id',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (chat_value,))
+        await msg.reply_text("Digital order review destination saved. Use /digital_admin_chat none to clear it and send receipts to each configured admin.")
+        return True
+    if value == "/digital_admin_chat none":
+        with db() as c:
+            c.execute("DELETE FROM settings WHERE key='digital_admin_chat_id'")
+        await msg.reply_text("Digital order review destination cleared.")
         return True
     if value.startswith("/digital_text "):
         parts = value[len("/digital_text "):].split(" ", 1)
