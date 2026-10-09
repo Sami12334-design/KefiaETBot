@@ -433,6 +433,14 @@ async def create_buy_usdt_order_for_message(update, context, uid, state, slug):
     total = (amount * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     details = gateway["details"] or f"{gateway['icon']} {gateway['name']}\nNumber: {gateway['number']}\nName: {gateway['account_name']}"
     with db() as c:
+        reserved = c.execute(
+            "UPDATE settings SET value=CAST(value AS REAL)-? WHERE key='buy_usdt_stock' AND CAST(value AS REAL)>=?",
+            (str(amount), str(amount))
+        )
+        if reserved.rowcount != 1:
+            await update.effective_message.reply_text(render_digital_template(
+                setting_value("buy_usdt_stock_error", ""), buy_usdt_values(amount=amount)))
+            return
         cur = c.execute(
             "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,transfer_destination,status,created_at,updated_at) "
             "VALUES(?,'buy',?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
