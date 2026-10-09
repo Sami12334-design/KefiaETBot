@@ -37,10 +37,6 @@ KefiaETBot is a Telegram bot MVP for admin-managed task campaigns, referral trac
 - `/myads` — list your recent ad requests and their statuses.
 
 Ad-payment proof is forwarded to configured admins for manual verification. The bot does not independently verify bank/mobile-money payments; admins must check the actual transaction before approving the request.
-- `/set usdt_etb_rate 150`
-- `/set price_ad_product 500`
-- `/set price_ad_members 300`
-- `/set price_ad_views 200`
 
 Use the Admin Dashboard to create join tasks. The bot must be a channel administrator and must be allowed to create invitation links. Add it to a channel before creating a task.
 
