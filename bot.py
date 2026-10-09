@@ -1491,9 +1491,13 @@ async def handle_digital_admin_command(update, context, value):
             await msg.reply_text("Months must be positive; price and stock must be zero or greater.")
             return True
         with db() as c:
-            c.execute("INSERT INTO digital_products(id,name,duration_months,price,stock,updated_at) VALUES(?,?,?,?,?,?)",
-                      (parts[0],parts[1],months,price,stock,now()))
-        await msg.reply_text("Digital product added. Set its description/features with /product_set.")
+            c.execute(
+                "INSERT INTO digital_products(id,name,duration_months,price,stock,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET name=excluded.name,duration_months=excluded.duration_months,"
+                "price=excluded.price,stock=excluded.stock,updated_at=excluded.updated_at",
+                (parts[0],parts[1],months,price,stock,now())
+            )
+        await msg.reply_text("Digital product added/updated. Set its description/features with /product_set.")
         return True
     if value.startswith("/product_set "):
         parts = value[len("/product_set "):].split(" ", 2)
