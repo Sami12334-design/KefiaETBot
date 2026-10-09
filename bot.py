@@ -1818,6 +1818,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
         with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action IN ('admin_promoter_setting','admin_promoter_message','admin_promoter_edit_payout')", (uid,))
             profiles = c.execute("SELECT user_id,status,completed_count,target_count,method FROM promoter_profiles ORDER BY updated_at DESC LIMIT 20").fetchall()
         rows = [[(f"{p['user_id']} · {p['completed_count']}/{p['target_count']} · {p['status']}", f"admin_promoter_user_{p['user_id']}")] for p in profiles]
         rows.extend([[("🔄 Refresh","admin_promoter_users")],[("⬅️ Promoter Program","admin_promoters")],[("⬅️ Admin Dashboard","admin")]])
@@ -1825,6 +1826,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action.startswith("admin_promoter_user_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action IN ('admin_promoter_setting','admin_promoter_message','admin_promoter_edit_payout')", (uid,))
         try: promoter_uid = int(action.removeprefix("admin_promoter_user_"))
         except ValueError:
             await q.edit_message_text("Invalid promoter user ID."); return
