@@ -1540,7 +1540,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         points = u["points"] if u else 0
         if promoter and int(promoter["completed_count"]) < int(promoter["target_count"]):
             await q.edit_message_text(f"🔒 Promoter withdrawal is locked until you reach your target.\n\nVerified joins: {promoter['completed_count']}/{promoter['target_count']}\nPoints in wallet: {points}\n\nShare your unique referral link with real people, then check your progress again.", reply_markup=kb([[("🔗 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]])); return
-        if points < minimum_points:
+        if promoter and points < 1:
+            await q.edit_message_text("You have no points available to withdraw yet.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]])); return
+        if points < minimum_points and not promoter:
             await q.edit_message_text(f"💸 Withdrawal unavailable yet.\nYour points: {points}\nMinimum: {minimum_points} points.\nAdmins can change this limit.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
         if promoter:
             if not promoter["account_number"] or not promoter["account_name"]:
@@ -1557,6 +1559,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'withdraw','') ON CONFLICT(user_id) DO UPDATE SET action='withdraw',data=''", (uid,))
         await q.edit_message_text("Enter withdrawal method and details in one message (example: Telebirr, account/phone). Your request will be reviewed by an admin.", reply_markup=kb([[("Cancel","home")]]))
     elif action == "ads":
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
         await q.edit_message_text("📣 Promotion / Ads Center\n\nChoose what you want to do:", reply_markup=kb([
             [("📢 ቻናል አለኝ፣ ማስተዋወቅ እፈልጋለሁ (Promoter)","promoter_start")],
             [("🛍 ምርቴን ማስታወቅ እፈልጋለሁ (Advertiser)","advertiser_start")],
@@ -1781,6 +1785,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "admin_promoters":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action IN ('admin_promoter_setting','admin_promoter_message','admin_promoter_edit_payout')", (uid,))
         rules = setting_value("promoter_rules", "")
         channel = setting_value("promoter_channel", "Not set")
         target = setting_value("promoter_target", "100")
