@@ -1156,6 +1156,9 @@ async def digital_callback(update, context, action):
             ("❌ Cancel button label", "digital_cancel_button"),
             ("⬅️ Marketplace button label", "digital_market_button"),
             ("💳 Choose-payment prompt", "digital_choose_gateway_prompt"),
+            ("🛍 Marketplace heading", "digital_market_title"),
+            ("🏷 Product listing label template", "digital_market_product_button_template"),
+            ("📸 Receipt upload instructions", "digital_receipt_upload_prompt"),
         ]
         rows = [[(label, f"digital_admin_message_{key}")] for label,key in message_settings]
         rows.append([("⬅️ Digital Products", "admin_digital_products")])
@@ -1174,7 +1177,8 @@ async def digital_callback(update, context, action):
             "digital_product_details_template", "digital_payment_template", "digital_waiting_message",
             "digital_no_stock_message", "digital_no_gateway_message", "digital_cancel_message",
             "digital_buy_button", "digital_cancel_button",
-            "digital_market_button", "digital_choose_gateway_prompt"
+            "digital_market_button", "digital_choose_gateway_prompt", "digital_market_title",
+            "digital_market_product_button_template", "digital_receipt_upload_prompt"
         }
         if key not in allowed:
             await q.edit_message_text("This message is not editable here."); return
