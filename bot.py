@@ -144,6 +144,20 @@ def init_db():
           updated_at TEXT NOT NULL, admin_id INTEGER, admin_reply TEXT
         );
         """)
+        # Marketplace account listings: add columns safely for existing SQLite databases.
+        market_columns = {row["name"] for row in c.execute("PRAGMA table_info(market_listings)").fetchall()}
+        for column, declaration in (
+            ("short_description", "TEXT NOT NULL DEFAULT ''"),
+            ("listing_active", "INTEGER NOT NULL DEFAULT 0"),
+            ("purchase_status", "TEXT NOT NULL DEFAULT 'available'"),
+            ("buyer_user_id", "INTEGER"),
+            ("payment_method", "TEXT NOT NULL DEFAULT ''"),
+            ("receipt_file_id", "TEXT NOT NULL DEFAULT ''"),
+            ("receipt_type", "TEXT NOT NULL DEFAULT ''"),
+            ("admin_note", "TEXT NOT NULL DEFAULT ''"),
+        ):
+            if column not in market_columns:
+                c.execute(f"ALTER TABLE market_listings ADD COLUMN {column} {declaration}")
         # Editable database defaults: admins can replace these values without code changes.
         c.execute("""INSERT OR IGNORE INTO digital_products
           (id,name,duration_months,price,stock,description,features,important_note,notice,warranty,active,updated_at)
@@ -1644,10 +1658,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "market":
         rows = [
             [(setting_value("buy_usdt_menu_button", "💵 Buy USDT | USDT ይግዙ"),"buy_usdt")],
-            [("📲 Buy social-media promotion/accounts","buy_social")],
+            [("📱 Buy social media accounts","buy_accounts")],
+            [("📣 Social media promotion","buy_social")],
             [("💸 Sell USDT | USDT ይሽጡ","sell_usdt")],
-            [("📤 Sell a social-media asset","sell_social")],
-            [("📋 My listings","my_market")],
+            [("📤 Sell a social media account","sell_social")],
         ]
         for product in digital_products():
             label = render_digital_template(
@@ -1657,18 +1671,129 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append([(label[:60], f"digital_product_{product['id']}")])
         rows.append([("⬅️ Dashboard","home")])
         await q.edit_message_text(digital_template("digital_market_title", "🛍 Marketplace — choose what you want to do:"), reply_markup=kb(rows))
-    elif action in ("buy_social","sell_social"):
-        labels = {"buy_social":"buy a listed social-media service/asset",
-                  "sell_social":"submit a social-media asset for review"}
+    elif action == "buy_accounts":
+        await q.edit_message_text("📱 BUY SOCIAL MEDIA ACCOUNTS\n\nChoose the platform you are interested in:", reply_markup=kb([
+            [("🎵 TikTok","buy_accounts_tiktok")],
+            [("✈️ Telegram","buy_accounts_telegram")],
+            [("▶️ YouTube","buy_accounts_youtube")],
+            [("📸 Instagram","buy_accounts_instagram")],
+            [("📘 Facebook","buy_accounts_facebook")],
+            [("⬅️ Marketplace","market")]
+        ]))
+    elif action.startswith("buy_accounts_") and action != "buy_accounts":
+        platform_key = action.removeprefix("buy_accounts_")
+        platforms = {"tiktok":"TikTok","telegram":"Telegram","youtube":"YouTube","instagram":"Instagram","facebook":"Facebook"}
+        platform = platforms.get(platform_key)
+        if not platform:
+            await q.edit_message_text("Unknown platform.", reply_markup=kb([[("⬅️ Marketplace","market")]])); return
         with db() as c:
-            c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET action=excluded.action,data=excluded.data",
-                      (uid,action,labels[action]))
-        await q.edit_message_text(f"🛍 You selected: {labels[action]}.\n\nSend details in one message: asset/service, amount, link (if applicable), and your expected price. Social-media monetization and ownership are manually reviewed; never send passwords, seed phrases, or private keys.", reply_markup=kb([[("Cancel","home")]]))
+            listings = c.execute(
+                "SELECT id,short_description,details,price FROM market_listings "
+                "WHERE action='sell_social' AND status='approved' AND listing_active=1 "
+                "AND purchase_status='available' AND lower(asset_type)=lower(?) ORDER BY id DESC LIMIT 20",
+                (platform,)
+            ).fetchall()
+        rows = []
+        for item in listings:
+            description = (item["short_description"] or item["details"] or "Account details available on request").replace("\n"," ").strip()
+            if len(description) > 42: description = description[:39] + "..."
+            price_label = f"{item['price']:g} ETB" if item["price"] is not None else "Price pending"
+            rows.append([(f"#{item['id']} · {description} · {price_label}"[:62], f"account_view_{item['id']}")])
+        rows.extend([[("⬅️ Choose platform","buy_accounts")],[("⬅️ Marketplace","market")]])
+        await q.edit_message_text(f"📱 {platform} accounts available\n\nChoose an account to view its short description and price.", reply_markup=kb(rows))
+    elif action.startswith("account_view_"):
+        try: listing_id = int(action.removeprefix("account_view_"))
+        except ValueError:
+            await q.edit_message_text("Invalid listing."); return
+        with db() as c:
+            item = c.execute("SELECT * FROM market_listings WHERE id=? AND action='sell_social' AND status='approved' AND listing_active=1 AND purchase_status='available'", (listing_id,)).fetchone()
+        if not item:
+            await q.edit_message_text("This account listing is no longer available.", reply_markup=kb([[("📱 Browse accounts","buy_accounts")],[("⬅️ Marketplace","market")]])); return
+        description = (item["short_description"] or item["details"] or "Ask the admin for details.").strip()
+        price = f"{item['price']:g} ETB" if item["price"] is not None else "Price not set yet"
+        await q.edit_message_text(
+            f"📱 {item['asset_type']} account · #{item['id']}\n\n{description}\n\n💰 Price: {price}\n\n🔒 Never share account passwords or one-time verification codes in this chat. Confirm ownership and transfer terms with an admin.",
+            reply_markup=kb([[("🛒 Buy now",f"account_buy_{listing_id}")],[("⬅️ Back to listings",f"buy_accounts_{str(item['asset_type']).lower()}")],[("⬅️ Marketplace","market")]])
+        )
+    elif action.startswith("account_buy_"):
+        try: listing_id = int(action.removeprefix("account_buy_"))
+        except ValueError:
+            await q.edit_message_text("Invalid listing."); return
+        with db() as c:
+            item = c.execute("SELECT * FROM market_listings WHERE id=? AND action='sell_social' AND status='approved' AND listing_active=1 AND purchase_status='available'", (listing_id,)).fetchone()
+            gateways = c.execute("SELECT id,name FROM digital_payment_gateways WHERE enabled=1 ORDER BY name").fetchall()
+        if not item:
+            await q.edit_message_text("Sorry, this account is no longer available.", reply_markup=kb([[("📱 Browse accounts","buy_accounts")],[("⬅️ Marketplace","market")]])); return
+        if item["price"] is None or float(item["price"]) <= 0:
+            await q.edit_message_text("The admin has not set a valid price for this account yet. Please check back later.", reply_markup=kb([[("⬅️ Back to listing",f"account_view_{listing_id}")]])); return
+        if not gateways:
+            await q.edit_message_text("Payment is temporarily unavailable. Please contact an admin.", reply_markup=kb([[("⬅️ Back to listing",f"account_view_{listing_id}")]])); return
+        rows = [[(f"{g['name']}",f"account_pay_{listing_id}_{g['id']}")] for g in gateways]
+        rows.append([("❌ Cancel",f"account_view_{listing_id}")])
+        await q.edit_message_text(f"🛒 Buy {item['asset_type']} account #{listing_id}\nPrice: {float(item['price']):g} ETB\n\nChoose your payment method:", reply_markup=kb(rows))
+    elif action.startswith("account_pay_"):
+        parts = action.split("_",3)
+        if len(parts) != 4 or not parts[2].isdigit():
+            await q.edit_message_text("Invalid payment option."); return
+        listing_id, gateway_id = int(parts[2]), parts[3]
+        with db() as c:
+            item = c.execute("SELECT * FROM market_listings WHERE id=? AND action='sell_social' AND status='approved' AND listing_active=1 AND purchase_status='available'", (listing_id,)).fetchone()
+            gateway = c.execute("SELECT * FROM digital_payment_gateways WHERE id=? AND enabled=1", (gateway_id,)).fetchone()
+            if item and gateway and item["price"] is not None and float(item["price"]) > 0:
+                cur = c.execute("UPDATE market_listings SET purchase_status='awaiting_payment',buyer_user_id=?,payment_method=? WHERE id=? AND purchase_status='available'", (uid,gateway["name"],listing_id))
+                reserved = cur.rowcount == 1
+            else: reserved = False
+        if not reserved:
+            await q.edit_message_text("This listing or payment method is no longer available. Please choose another listing.", reply_markup=kb([[("📱 Browse accounts","buy_accounts")],[("⬅️ Marketplace","market")]])); return
+        set_pending(uid,"account_buy_receipt",{"listing_id":listing_id,"gateway_id":gateway_id,"gateway_name":gateway["name"]})
+        await q.edit_message_text(
+            f"💳 PAYMENT DETAILS · ACCOUNT #{listing_id}\n\nAmount: {float(item['price']):g} ETB\nMethod: {gateway['name']}\nAccount/Number: {gateway['account_number']}\nAccount holder: {gateway['account_name']}\n\n{gateway['instructions']}\n\nAfter paying, upload a clear payment screenshot as a photo or document. An admin will verify it manually before processing the order.\n{gateway['warning']}",
+            reply_markup=kb([[("❌ Cancel purchase",f"account_cancel_{listing_id}")]])
+        )
+    elif action.startswith("account_cancel_"):
+        try: listing_id = int(action.removeprefix("account_cancel_"))
+        except ValueError: listing_id = 0
+        with db() as c:
+            c.execute("UPDATE market_listings SET purchase_status='available',buyer_user_id=NULL,payment_method='' WHERE id=? AND buyer_user_id=? AND purchase_status='awaiting_payment'", (listing_id,uid))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+        await q.edit_message_text("Purchase cancelled. You can browse the listings again.", reply_markup=kb([[("📱 Browse accounts","buy_accounts")],[("⬅️ Marketplace","market")]]))
+    elif action in ("buy_social","sell_social"):
+        if action == "buy_social":
+            await q.edit_message_text("📣 SOCIAL MEDIA PROMOTION\n\nChoose a promotion service:", reply_markup=kb([
+                [("📣 Promote a channel / page","ad_product")],
+                [("👥 Get channel members","ad_members")],
+                [("👁️ Get views / reach","ad_views")],
+                [("⬅️ Marketplace","market")]
+            ]))
+        else:
+            await q.edit_message_text("📤 SELL A SOCIAL MEDIA ACCOUNT\n\nChoose the platform, then send a short description, any public profile link, and your expected price. Do not send passwords or verification codes.", reply_markup=kb([
+                [("🎵 TikTok","sell_account_tiktok")],
+                [("✈️ Telegram","sell_account_telegram")],
+                [("▶️ YouTube","sell_account_youtube")],
+                [("📸 Instagram","sell_account_instagram")],
+                [("📘 Facebook","sell_account_facebook")],
+                [("📋 My listings","my_market")],
+                [("⬅️ Marketplace","market")]
+            ]))
+    elif action.startswith("sell_account_"):
+        platform_key = action.removeprefix("sell_account_")
+        platforms = {"tiktok":"TikTok","telegram":"Telegram","youtube":"YouTube","instagram":"Instagram","facebook":"Facebook"}
+        platform = platforms.get(platform_key)
+        if not platform:
+            await q.edit_message_text("Unknown platform.", reply_markup=kb([[("⬅️ Marketplace","market")]])); return
+        set_pending(uid,"sell_social",{"platform":platform})
+        await q.edit_message_text(f"📤 List your {platform} account\n\nSend a short description, public profile link (if available), and your expected price in ETB. Never send passwords, one-time codes, or recovery details.", reply_markup=kb([[("❌ Cancel","market")]]))
+    elif action == "my_market":
+        with db() as c:
+            rows = c.execute("SELECT id,action,asset_type,status,price FROM market_listings WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,)).fetchall()
+        msg = "📋 YOUR LISTINGS\n\n" + ("\n".join(f"#{r['id']} · {r['asset_type']} · {r['status']} · {r['price'] if r['price'] is not None else 'price pending'} ETB" for r in rows) if rows else "You haven't submitted any listings yet.")
+        await q.edit_message_text(msg, reply_markup=kb([[("📤 Sell an account","sell_social")],[("⬅️ Marketplace","market")]]))
     elif action == "admin":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
         await q.edit_message_text("🛡 Admin Dashboard\nManage tasks, review payouts and listings, configure prices, and inspect platform statistics.", reply_markup=kb([
             [("➕ Create join task","admin_new_task"),("📊 Statistics","admin_stats")],
+            [("🛍 Social account listings","admin_marketplace")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
             [("🌟 Gemini Pro & Products","admin_digital_products")],
