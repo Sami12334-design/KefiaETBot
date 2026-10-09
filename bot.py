@@ -25,8 +25,8 @@ from telegram import (
     ChatMemberUpdated
 )
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler, MessageHandler,
-    ChatMemberHandler, ContextTypes, filters
+    Application, ApplicationHandlerStop, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ChatMemberHandler, TypeHandler, ContextTypes, filters
 )
 
 # KefiaETBot MVP: task rewards, invite tracking, ad requests, marketplace,
@@ -540,6 +540,94 @@ def setting_value(key, default=None):
     with db() as c:
         row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
+
+
+def required_channel_config():
+    """Database settings override Render environment defaults."""
+    channel = setting_value("force_join_channel")
+    if channel is None:
+        channel = os.getenv("FORCE_JOIN_CHANNEL", "").strip()
+    channel = str(channel or "").strip()
+    if channel.lower() in {"", "off", "none", "disabled", "false"}:
+        return "", ""
+    join_url = setting_value("force_join_url")
+    if join_url is None:
+        join_url = os.getenv("FORCE_JOIN_URL", "").strip()
+    join_url = str(join_url or "").strip()
+    if not join_url and channel.startswith("@"):
+        join_url = "https://t.me/" + channel[1:]
+    elif not join_url and not channel.lstrip("-").isdigit() and "t.me/" in channel:
+        join_url = channel if channel.startswith(("https://", "http://")) else "https://" + channel
+    return channel, join_url
+
+
+async def enforce_required_channel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Block non-admin users from using the bot until they join the configured channel."""
+    user = update.effective_user
+    if not user or is_admin(user.id):
+        return
+
+    channel, join_url = required_channel_config()
+    if not channel:
+        return
+
+    query = update.callback_query
+    if query and query.data != "force_join_check":
+        # Don't let other callback actions run until membership is verified.
+        pass
+
+    try:
+        member = await context.bot.get_chat_member(channel, user.id)
+        joined = member.status in ("member", "administrator", "creator") or bool(
+            getattr(member, "is_member", False)
+        )
+    except Exception:
+        log.exception("Could not verify required-channel membership for user_id=%s channel=%r", user.id, channel)
+        message_text = (
+            "⚠️ I couldn't verify your channel membership. Please contact the bot administrator.\n"
+            "The channel may be private, the channel ID/username may be incorrect, or the bot may need admin access."
+        )
+        if query:
+            await query.answer()
+            try:
+                await query.edit_message_text(message_text)
+            except Exception:
+                pass
+        elif update.effective_message:
+            await update.effective_message.reply_text(message_text)
+        raise ApplicationHandlerStop
+
+    if joined:
+        if query and query.data == "force_join_check":
+            await query.answer("Membership verified! Welcome.")
+            await query.edit_message_text(
+                f"✅ You're a member of the required channel. Welcome, {user.first_name or 'there'}!",
+                reply_markup=home_keyboard(is_admin(user.id)),
+            )
+            raise ApplicationHandlerStop
+        return
+
+    if query:
+        await query.answer()
+        text_body = "🔒 To use KefiaETBot, please join our required Telegram channel first, then tap “I've joined”."
+        buttons = []
+        if join_url:
+            buttons.append([InlineKeyboardButton("📢 Join Required Channel", url=join_url)])
+        buttons.append([InlineKeyboardButton("✅ I've joined — Check", callback_data="force_join_check")])
+        try:
+            await query.edit_message_text(text_body, reply_markup=InlineKeyboardMarkup(buttons))
+        except Exception:
+            await context.bot.send_message(
+                chat_id=user.id, text=text_body, reply_markup=InlineKeyboardMarkup(buttons)
+            )
+    elif update.effective_message:
+        text_body = "🔒 To use KefiaETBot, please join our required Telegram channel first, then tap “I've joined”."
+        buttons = []
+        if join_url:
+            buttons.append([InlineKeyboardButton("📢 Join Required Channel", url=join_url)])
+        buttons.append([InlineKeyboardButton("✅ I've joined — Check", callback_data="force_join_check")])
+        await update.effective_message.reply_text(text_body, reply_markup=InlineKeyboardMarkup(buttons))
+    raise ApplicationHandlerStop
 
 
 def setting_enabled(key, default=False):
@@ -3013,7 +3101,8 @@ async def set_setting(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
         await update.effective_message.reply_text("Usage: /set key value"); return
     key, value = context.args[0], " ".join(context.args[1:])
-    allowed = {"min_withdraw_points","usdt_etb_rate","price_ad_product","price_ad_members","price_ad_views","referral_points"}
+    allowed = {"min_withdraw_points","usdt_etb_rate","price_ad_product","price_ad_members","price_ad_views","referral_points",
+               "force_join_channel","force_join_url"}
     dynamic = (
         key in {"buy_enabled", "sell_enabled", "buy_unavailable_message", "sell_unavailable_message"}
         or key.startswith(("buy_payment_", "sell_payout_", "sell_network_", "buy_usdt_"))
@@ -4116,6 +4205,8 @@ def main():
     init_db()
     health_server = start_health_server()
     app = Application.builder().token(TOKEN).build()
+    # Run the channel-membership gate before all normal commands and callbacks.
+    app.add_handler(TypeHandler(Update, enforce_required_channel), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("set", set_setting))
     app.add_handler(CommandHandler("quote_ad", quote_ad))
