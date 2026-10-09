@@ -1,6 +1,7 @@
 import os
 import asyncio
 import sqlite3
+import re
 import json
 import math
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -9,6 +10,15 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timezone
 from functools import wraps
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+    from psycopg import IntegrityError as PostgreSQLIntegrityError
+except ImportError:  # SQLite remains available when DATABASE_URL is not configured.
+    psycopg = None
+    dict_row = None
+    PostgreSQLIntegrityError = None
 
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup,
@@ -38,11 +48,223 @@ def parse_admin_ids(value):
 
 ADMIN_IDS = parse_admin_ids(os.getenv("ADMIN_IDS", ""))
 DB_PATH = os.getenv("DATABASE_PATH", "kefiaetbot.db")
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+DB_INTEGRITY_ERROR = (sqlite3.IntegrityError, PostgreSQLIntegrityError) if PostgreSQLIntegrityError else (sqlite3.IntegrityError,)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("KefiaETBot")
 
 
+class PostgreSQLCursor:
+    """Small SQLite-style cursor adapter for the bot's existing query code."""
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self._inserted_id = None
+
+    def execute(self, sql, params=None):
+        self._inserted_id = None
+        sql = _translate_sql(sql)
+        match = re.match(r"^\s*INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.I)
+        if match and match.group(1).lower() in {
+            "tasks", "task_claims", "invite_events", "ad_requests",
+            "promoter_join_events", "market_listings", "withdrawals",
+            "crypto_orders", "digital_orders",
+        } and not re.search(r"\bRETURNING\b", sql, re.I):
+            sql = sql.rstrip().rstrip(";") + " RETURNING id"
+        self._cursor.execute(sql, params or ())
+        return self
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+    @property
+    def rowcount(self):
+        return self._cursor.rowcount
+
+    @property
+    def lastrowid(self):
+        if self._inserted_id is None:
+            row = self._cursor.fetchone()
+            if row:
+                self._inserted_id = row.get("id") if hasattr(row, "get") else row[0]
+        return self._inserted_id
+
+
+class PostgreSQLConnection:
+    """Expose the subset of sqlite3.Connection used by this bot."""
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is None:
+                self._connection.commit()
+            else:
+                self._connection.rollback()
+        finally:
+            self._connection.close()
+        return False
+
+    def execute(self, sql, params=None):
+        cursor = PostgreSQLCursor(self._connection.cursor())
+        return cursor.execute(sql, params)
+
+    def executescript(self, script):
+        # The initialization schema contains independent CREATE TABLE statements.
+        for statement in script.split(";"):
+            if statement.strip():
+                statement = re.sub(
+                    r"\bINTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT\b",
+                    "BIGSERIAL PRIMARY KEY", statement, flags=re.I
+                )
+                statement = re.sub(r"\bINTEGER\b", "BIGINT", statement, flags=re.I)
+                self.execute(statement)
+        return self
+
+    def close(self):
+        self._connection.close()
+
+
+def _translate_sql(sql):
+    """Translate the small set of SQLite SQL dialect features used by this bot."""
+    statement = sql.strip()
+    if re.match(r"^PRAGMA\s+foreign_keys\s*=", statement, re.I):
+        return "SELECT 1"
+    info = re.match(r"^PRAGMA\s+table_info\s*\(\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\)\s*;?$", statement, re.I)
+    if info:
+        return (
+            "SELECT column_name AS name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s ORDER BY ordinal_position"
+        )
+    statement = re.sub(r"\bCOLLATE\s+NOCASE\b", "", statement, flags=re.I)
+    ignored_insert = re.match(r"^INSERT\s+OR\s+IGNORE\s+INTO\b", statement, re.I)
+    if ignored_insert:
+        statement = re.sub(r"^INSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT INTO", statement, count=1, flags=re.I)
+        statement = statement.rstrip().rstrip(";") + " ON CONFLICT DO NOTHING"
+    # Convert positional SQLite placeholders without touching quoted text.
+    result = []
+    quote = None
+    i = 0
+    while i < len(statement):
+        ch = statement[i]
+        if quote:
+            result.append(ch)
+            if ch == quote:
+                if i + 1 < len(statement) and statement[i + 1] == quote:
+                    result.append(statement[i + 1])
+                    i += 1
+                else:
+                    quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            result.append(ch)
+        elif ch == "?":
+            result.append("%s")
+        else:
+            result.append(ch)
+        i += 1
+    return "".join(result)
+
+
+def migrate_legacy_sqlite(c):
+    """Copy an existing SQLite database into PostgreSQL once, before default seeding."""
+    if not DATABASE_URL:
+        return
+    c.execute(
+        "CREATE TABLE IF NOT EXISTS _sqlite_migration_state "
+        "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+    )
+    state = c.execute(
+        "SELECT value FROM _sqlite_migration_state WHERE key='legacy_sqlite_v1'"
+    ).fetchone()
+    if state:
+        log.info("Legacy SQLite migration already marked complete.")
+        return
+    if not os.path.isfile(DB_PATH) or os.path.getsize(DB_PATH) == 0:
+        log.warning(
+            "DATABASE_URL is configured but no legacy SQLite file was found at %s. "
+            "PostgreSQL will be initialized without importing old SQLite records.",
+            DB_PATH,
+        )
+        return
+    source = None
+    try:
+        source = sqlite3.connect(DB_PATH)
+        source.row_factory = sqlite3.Row
+        source_tables = [
+            row["name"] for row in source.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY rowid"
+            ).fetchall()
+        ]
+        if not source_tables:
+            log.warning("Legacy SQLite file has no application tables; no records imported.")
+            return
+        auto_id_tables = (
+            "tasks", "task_claims", "invite_events", "ad_requests",
+            "promoter_join_events", "market_listings", "withdrawals",
+            "crypto_orders", "digital_orders",
+        )
+        copied_rows = 0
+        for table in source_tables:
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table):
+                continue
+            target_columns = [
+                row["column_name"] for row in c.execute(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=%s ORDER BY ordinal_position",
+                    (table.lower(),),
+                ).fetchall()
+            ]
+            if not target_columns:
+                continue
+            source_columns = [row["name"] for row in source.execute(f'PRAGMA table_info("{table}")').fetchall()]
+            columns = [name for name in source_columns if name in target_columns]
+            if not columns:
+                continue
+            quoted_columns = ", ".join('"' + name + '"' for name in columns)
+            placeholders = ", ".join(["%s"] * len(columns))
+            insert_sql = (
+                f'INSERT INTO "{table}" ({quoted_columns}) VALUES ({placeholders}) '
+                "ON CONFLICT DO NOTHING"
+            )
+            rows = source.execute(f'SELECT {quoted_columns} FROM "{table}"').fetchall()
+            for row in rows:
+                c.execute(insert_sql, tuple(row[name] for name in columns))
+                copied_rows += 1
+        # Align generated IDs with imported rows to prevent duplicate-ID failures.
+        for table in auto_id_tables:
+            c.execute(
+                f"SELECT setval(pg_get_serial_sequence('{table}', 'id'), "
+                f"GREATEST(COALESCE(MAX(id), 1), 1), COUNT(*) > 0) FROM {table}"
+            )
+        c.execute(
+            "INSERT INTO _sqlite_migration_state(key,value) "
+            "VALUES('legacy_sqlite_v1', %s) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",
+            (f"imported_rows={copied_rows}",),
+        )
+        log.info("Imported %s legacy SQLite rows into PostgreSQL.", copied_rows)
+    except Exception:
+        log.exception("Legacy SQLite migration failed; startup will stop to avoid silently losing data.")
+        raise
+    finally:
+        if source is not None:
+            source.close()
+
+
 def db():
+    if DATABASE_URL:
+        if psycopg is None:
+            raise RuntimeError(
+                "DATABASE_URL is set but psycopg is missing. Add psycopg[binary] to requirements.txt."
+            )
+        connection = psycopg.connect(DATABASE_URL, row_factory=dict_row, connect_timeout=15)
+        return PostgreSQLConnection(connection)
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA foreign_keys=ON")
@@ -162,6 +384,10 @@ def init_db():
         task_columns = {row["name"] for row in c.execute("PRAGMA table_info(tasks)").fetchall()}
         if "participant_limit" not in task_columns:
             c.execute("ALTER TABLE tasks ADD COLUMN participant_limit INTEGER NOT NULL DEFAULT 0")
+
+        # Import the old database before seeding defaults, so saved admin settings win.
+        if DATABASE_URL:
+            migrate_legacy_sqlite(c)
 
         # Editable database defaults: admins can replace these values without code changes.
         c.execute("""INSERT OR IGNORE INTO digital_products
@@ -3755,7 +3981,7 @@ async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYP
                     "INSERT INTO promoter_join_events(promoter_user_id,joined_user_id,invite_link,joined_at) VALUES(?,?,?,?)",
                     (promoter["user_id"], joined_id, link, now())
                 )
-            except sqlite3.IntegrityError:
+            except DB_INTEGRITY_ERROR:
                 return
 
             updated = c.execute(
@@ -3789,7 +4015,7 @@ async def track_channel_member(update: Update, context: ContextTypes.DEFAULT_TYP
                     "INSERT INTO invite_events(invite_link,joined_user_id,joined_at) VALUES(?,?,?)",
                     (link, joined_id, now())
                 )
-            except sqlite3.IntegrityError:
+            except DB_INTEGRITY_ERROR:
                 return
 
             task = c.execute(
