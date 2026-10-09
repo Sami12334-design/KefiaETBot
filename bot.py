@@ -2256,15 +2256,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with db() as c:
                 c.execute(
                     "INSERT INTO digital_products(id,name,duration_months,price,stock,description,features,important_note,notice,warranty,active,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,1,?)",
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,0,?)",
                     (vals["id"], vals["name"], vals["duration_months"], vals["price"], vals["stock"],
                      vals.get("description",""), vals.get("features",""), vals.get("important_note",""),
                      vals.get("notice",""), vals.get("warranty",""), now())
                 )
                 c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
             await message.reply_text(
-                f"✅ Product “{vals['name']}” was created and published. It now appears in the marketplace.\n\n"
-                "You can edit its price, stock, description, or hide it any time.",
+                f"✅ Product “{vals['name']}” was created as a draft and is hidden from customers.\n\n"
+                "Review its price, stock, and details, then tap Publish when it is ready.",
                 reply_markup=kb([[("✏️ Manage this product",f"digital_admin_product_{vals['id']}")],
                                  [("➕ Add another product","digital_admin_add_product")],
                                  [("⬅️ Digital Products","admin_digital_products")]])
@@ -2315,13 +2315,13 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             with db() as c:
                 c.execute(
                     "INSERT INTO digital_payment_gateways(id,name,account_number,account_name,instructions,warning,enabled,updated_at) "
-                    "VALUES(?,?,?,?,?,?,1,?)",
+                    "VALUES(?,?,?,?,?,?,0,?)",
                     (vals["id"],vals["name"],vals.get("account_number",""),vals.get("account_name",""),
                      vals.get("instructions",""),vals.get("warning",""),now())
                 )
                 c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
             await message.reply_text(
-                f"✅ Payment method “{vals['name']}” added and enabled for customers.",
+                f"✅ Payment method “{vals['name']}” was added as disabled. Review its account details and enable it when everything is correct.",
                 reply_markup=kb([[("✏️ Manage payment methods","digital_admin_gateways")],
                                  [("⬅️ Digital Products","admin_digital_products")]])
             )
