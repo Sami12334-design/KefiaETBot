@@ -1001,6 +1001,11 @@ def digital_product_values(product):
 async def digital_callback(update, context, action):
     q = update.callback_query
     uid = q.from_user.id
+    # Any admin navigation away from an unfinished digital-product form acts as Cancel.
+    # This prevents the next ordinary chat message from being mistaken for a product field.
+    if action == "admin_digital_products" or action == "admin_digital_orders" or action.startswith("digital_admin_"):
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='digital_admin_wizard'", (uid,))
     if action.startswith("digital_product_"):
         product_id = action[len("digital_product_"):]
         product = digital_product(product_id)
