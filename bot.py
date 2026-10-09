@@ -1382,7 +1382,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='admin_setting_value'", (uid,))
         await q.edit_message_text(
-            "⚙️ Prices & Limits\\n\\nChoose one service to manage. You’ll see its settings separately, then the bot will ask for one value at a time.",
+            "⚙️ Prices & Limits\n\nChoose one service to manage. You’ll see its settings separately, then the bot will ask for one value at a time.",
             reply_markup=kb([
                 [("📣 Ads & Promotion","admin_setgroup_ads")],
                 [("🎁 Rewards & Withdrawals","admin_setgroup_rewards")],
@@ -1424,7 +1424,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             current = setting_value(key, "Not set")
             rows.append([(f"{label}: {str(current)[:18]}", f"admin_setkey_{key}")])
         rows.extend([[("⬅️ Service groups","admin_settings")], [("⬅️ Admin Dashboard","admin")]])
-        await q.edit_message_text(f"{title}\\n\\nChoose the one setting you want to change:", reply_markup=kb(rows))
+        await q.edit_message_text(f"{title}\n\nChoose the one setting you want to change:", reply_markup=kb(rows))
     elif action.startswith("admin_setkey_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only.")
@@ -1461,7 +1461,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         }
         current = setting_value(key, "Not set")
         await q.edit_message_text(
-            f"✏️ Change: {labels[key]}\\n\\nCurrent value: {current}\\n\\nSend the new value in one message. "
+            f"✏️ Change: {labels[key]}\n\nCurrent value: {current}\n\nSend the new value in one message. "
             "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours.",
             reply_markup=kb([[("❌ Cancel","admin_settings")]])
         )
@@ -2022,7 +2022,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "buyusdt"
         )
         await message.reply_text(
-            f"✅ Saved successfully.\\n{key} = {value.strip()}\\n\\nWhat would you like to do next?",
+            f"✅ Saved successfully.\n{key} = {value.strip()}\n\nWhat would you like to do next?",
             reply_markup=kb([
                 [("✏️ Change another setting in this service", f"admin_setgroup_{group}")],
                 [("⚙️ Other service groups","admin_settings")],
