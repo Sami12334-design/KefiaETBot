@@ -187,11 +187,11 @@ def migrate_legacy_sqlite(c):
         log.info("Legacy SQLite migration already marked complete.")
         return
     if not os.path.isfile(DB_PATH) or os.path.getsize(DB_PATH) == 0:
-        raise RuntimeError(
-            "Legacy SQLite database not found at %s; refusing to start an empty PostgreSQL database. "
-            "Restore the old SQLite file or a backup before allowing the bot to start."
-            % DB_PATH
+        log.warning(
+            "No legacy SQLite database found at %s. Starting with a fresh PostgreSQL database as configured.",
+            DB_PATH,
         )
+        return
     source = None
     try:
         source = sqlite3.connect(DB_PATH)
@@ -203,10 +203,11 @@ def migrate_legacy_sqlite(c):
             ).fetchall()
         ]
         if not source_tables:
-            raise RuntimeError(
-                "Legacy SQLite file at %s has no application tables; refusing to start with an empty PostgreSQL database."
-                % DB_PATH
+            log.warning(
+                "Legacy SQLite file at %s has no application tables. Starting with a fresh PostgreSQL database.",
+                DB_PATH,
             )
+            return
         auto_id_tables = (
             "tasks", "task_claims", "invite_events", "ad_requests",
             "promoter_join_events", "market_listings", "withdrawals",
