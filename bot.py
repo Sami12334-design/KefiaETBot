@@ -2777,7 +2777,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("🌟 Gemini Pro & Products","admin_digital_products")],
             [("📣 Promoter Program Settings","admin_promoters")],
             [("📥 Review Promoter Submissions","promoter_ads_review")],
-            [("🔗 Invite & Earn Settings","admin_invite_earn")],
+            [("🔗 Manage Invite & Earn","admin_invite_earn")],
             [("⬅️ Dashboard","home")]
         ]))
     elif action == "admin_invite_earn":
@@ -2859,7 +2859,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_active',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_value,))
         await q.edit_message_text(
             "🔴 Invite & Earn is now unavailable to users." if new_value == "0" else "🟢 Invite & Earn is now available to users.",
-            reply_markup=kb([[("🔗 Invite & Earn Settings","admin_invite_earn")],[("⬅️ Admin Dashboard","admin")]])
+            reply_markup=kb([[("🔗 Manage Invite & Earn","admin_invite_earn")],[("⬅️ Admin Dashboard","admin")]])
         )
     elif action == "admin_invite_earn_users":
         if not is_admin(uid):
