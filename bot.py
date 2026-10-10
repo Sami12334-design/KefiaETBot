@@ -3353,7 +3353,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             total_users = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
         await q.edit_message_text(
-            f"👥 TOTAL BOT USERS\\n\\nRegistered users: {total_users}",
+            f"👥 TOTAL BOT USERS\n\nRegistered users: {total_users}",
             reply_markup=kb([[("🔄 Refresh","admin_total_bot_users")], [("⬅️ Admin Dashboard","admin")]])
         )
     elif action == "admin_stats":
