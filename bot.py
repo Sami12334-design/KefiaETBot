@@ -2680,7 +2680,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
             [("🌟 Gemini Pro & Products","admin_digital_products")],
-            [("📣 Promoter Program","admin_promoters")],
+            [("📣 Promoter Program Settings","admin_promoters")],
+            [("📥 Review Promoter Submissions","promoter_ads_review")],
             [("🔗 Invite & Earn Settings","admin_invite_earn")],
             [("⬅️ Dashboard","home")]
         ]))
