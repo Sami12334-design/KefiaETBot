@@ -2255,13 +2255,45 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("⬅️ Dashboard","home")]
         ]))
     elif action == "advertiser_start":
-        await q.edit_message_text("🛍 Advertiser Center\nChoose what you want to promote:", reply_markup=kb([
-            [("🚀 Promote my product","ad_product")],
-            [("👥 Get channel members","ad_members")],
-            [("👁️ Get views / reach","ad_views")],
-            [("📋 My ad requests","my_ads")],
-            [("⬅️ Promotion Center","ads")]
-        ]))
+        if not setting_enabled("advertiser_active", True):
+            await q.edit_message_text(str(setting_value("advertiser_unavailable_message", "Advertiser service is temporarily unavailable.")), reply_markup=kb([[( "📋 My ad requests","my_ads")],[( "⬅️ Promotion Center","ads")]])); return
+        rules=str(setting_value("advertiser_rules","Please follow the advertising conditions."))
+        channels=str(setting_value("advertiser_channels","Not configured yet"))
+        await q.edit_message_text("🛍 ADVERTISER CENTER\n\n📡 Available channels\n"+channels+"\n\n📌 CONDITIONS\n"+rules+"\n\nTap Continue to choose your product type, duration, price and payment information.", reply_markup=kb([[( "➡️ Continue","advertiser_continue")],[( "📋 My ad requests","my_ads")],[( "⬅️ Promotion Center","ads")]]))
+    elif action == "advertiser_continue":
+        if not setting_enabled("advertiser_active", True):
+            await q.edit_message_text(str(setting_value("advertiser_unavailable_message","Advertiser service is temporarily unavailable.")),reply_markup=kb([[( "⬅️ Promotion Center","ads")]])); return
+        set_pending(uid,"advertiser_form",{"step":"product_type"})
+        await q.edit_message_text("🛍 What type of product or service do you want to advertise?",reply_markup=kb([[( "📦 Physical product","advertiser_type_product"),( "📱 App / software","advertiser_type_app")],[( "🛠 Service","advertiser_type_service"),( "📣 Channel / content","advertiser_type_channel")],[( "✍️ Other","advertiser_type_other")],[( "❌ Cancel","ads")]]))
+    elif action.startswith("advertiser_type_"):
+        kinds={"product":"Physical product","app":"App / software","service":"Service","channel":"Channel / content","other":"Other"}
+        kind=action.removeprefix("advertiser_type_")
+        if kind not in kinds: await q.answer("Unknown product type.",show_alert=True); return
+        set_pending(uid,"advertiser_form",{"step":"duration","product_type":kinds[kind]})
+        labels=[]
+        for period,label in [("day","Per day"),("week","Per week"),("month","Per month")]:
+            price=str(setting_value("advertiser_price_"+period,"") or "").strip()
+            labels.append((label+(" · "+price+" ETB" if price else " · price not set"),"advertiser_duration_"+period))
+        await q.edit_message_text("Type: "+kinds[kind]+"\n\nChoose advertising duration. The exact price and payment details will appear next.",reply_markup=kb([[labels[0]],[labels[1]],[labels[2]],[( "⬅️ Back","advertiser_continue")],[( "❌ Cancel","ads")]]))
+    elif action.startswith("advertiser_duration_"):
+        period=action.removeprefix("advertiser_duration_")
+        if period not in {"day","week","month"}: await q.answer("Unknown period.",show_alert=True); return
+        with db() as c: pending=c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?",(uid,)).fetchone()
+        if not pending or pending["action"]!="advertiser_form":
+            await q.edit_message_text("Your advertiser form expired. Please start again.",reply_markup=kb([[( "🛍 Advertiser Center","advertiser_start")]])); return
+        state=decode_pending(pending["data"])
+        raw=str(setting_value("advertiser_price_"+period,"") or "").strip()
+        if not raw:
+            await q.edit_message_text("⚠️ Price for this period has not been configured. Choose another period or contact an admin.",reply_markup=kb([[( "💵 Per day","advertiser_duration_day")],[( "📅 Per week","advertiser_duration_week")],[( "🗓 Per month","advertiser_duration_month")],[( "⬅️ Back","advertiser_continue")]])); return
+        try:
+            price=float(raw.replace(",",""))
+            if price<0 or not math.isfinite(price): raise ValueError()
+        except ValueError:
+            await q.edit_message_text("⚠️ The configured price is invalid. Please contact an admin.",reply_markup=kb([[( "⬅️ Back","advertiser_continue")]])); return
+        state.update({"step":"content","duration":period,"price":price})
+        set_pending(uid,"advertiser_content",state)
+        payment=str(setting_value("advertiser_payment_info","Payment information has not been configured yet."))
+        await q.edit_message_text("💰 ADVERTISING QUOTE\n\nProduct type: "+state.get("product_type","Other")+"\nDuration: "+{"day":"Per day","week":"Per week","month":"Per month"}[period]+"\nPrice: "+str(price)+" ETB\n\n🏦 PAYMENT INFORMATION\n"+payment+"\n\n📤 Now send your ad content as text, photo, video, PDF, APK, or another document. Admins will review it and reply here. Do not pay until you have checked the details.",reply_markup=kb([[( "❌ Cancel","ads")]]))
     elif action == "promoter_market_start":
         if not setting_enabled("promoter_ads_active"):
             await q.edit_message_text("📣 Promoter submissions are temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
