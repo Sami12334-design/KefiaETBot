@@ -824,10 +824,11 @@ async def start_crypto_flow(q, context, side):
     enabled_key = f"{side}_enabled"
     custom_message = setting_value(f"{side}_unavailable_message", "").strip()
     if not setting_enabled(enabled_key, default=True):
-        if custom_message:
-            await q.edit_message_text(custom_message, reply_markup=kb([[("⬅️ Dashboard", "home")]]))
-            return
-        # Empty custom message intentionally means: skip the unavailable notice and show the normal flow.
+        await q.edit_message_text(
+            custom_message or ("💸 Sell USDT is temporarily unavailable. Please try again later." if side == "sell" else "Buy USDT is temporarily unavailable. Please try again later."),
+            reply_markup=kb([[("⬅️ Dashboard", "home")]])
+        )
+        return
     if side == "buy":
         set_pending(uid, "buy_usdt_amount", {})
         await q.edit_message_text(buy_usdt_amount_prompt(),
