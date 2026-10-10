@@ -3322,6 +3322,35 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.effective_message
     if not user or not message:
         return
+    # Admin can send a text/photo/document response to a promoter submission.
+    with db() as c:
+        current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+    if is_admin(user.id) and current_pending and current_pending["action"] == "promoter_ads_admin_message":
+        state = decode_pending(current_pending["data"])
+        target_user = int(state.get("target_user_id",0))
+        submission_id = int(state.get("submission_id",0))
+        caption_text = (message.caption or "").strip()
+        if not target_user:
+            await message.reply_text("The promoter recipient was not found."); return
+        try:
+            note = caption_text
+            if message.photo:
+                await context.bot.send_photo(target_user, message.photo[-1].file_id,
+                    caption=("📩 Message from KefiaETBot admin about your promoter submission.\n\n"+caption_text)[:1024])
+            elif message.document:
+                await context.bot.send_document(target_user, message.document.file_id,
+                    caption=("📩 Message from KefiaETBot admin about your promoter submission.\n\n"+caption_text)[:1024])
+            else:
+                await message.reply_text("Please send a photo or document, optionally with a caption."); return
+            with db() as c:
+                c.execute("UPDATE promoter_ad_submissions SET admin_note=?,updated_at=? WHERE id=?", (note or "Admin sent media message",now(),submission_id))
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ Media message delivered to promoter.", reply_markup=kb([[("📋 View submission",f"promoter_ads_view_{submission_id}")],[("⬅️ Submissions","promoter_ads_review")]]))
+        except Exception:
+            log.exception("Could not send promoter submission media")
+            await message.reply_text("Could not deliver the media. The user may have blocked the bot.")
+        return
+
     # Admin can send a photo/document to a marketplace buyer or seller from the listing controls.
     with db() as c:
         current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
