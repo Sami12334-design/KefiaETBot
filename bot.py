@@ -2365,6 +2365,36 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             u = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
         await q.edit_message_text(f"👤 Account\nName: {q.from_user.full_name}\nUser ID: {uid}\nPoints: {u['points'] if u else 0}\nMember since: {u['joined_at'][:10] if u else '—'}", reply_markup=kb([[("⬅️ Dashboard","home")]]))
+    elif action == "promoter_chat":
+        if not setting_enabled("promoter_chat_enabled", True):
+            await q.edit_message_text("Promoter support chat is temporarily unavailable.", reply_markup=kb([[( "⬅️ Promotion Center","ads")]])); return
+        set_pending(uid, "promoter_user_chat", {})
+        await q.edit_message_text("💬 CHAT WITH ADMIN\n\nSend any text, photo, or document here and it will be forwarded to the admin team. You can send multiple messages. Send /done when you want to leave chat mode.", reply_markup=kb([[( "✅ Finish chat","promoter_chat_done")],[( "⬅️ Promoter dashboard","promoter_stats")]]))
+    elif action == "promoter_chat_done":
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='promoter_user_chat'", (uid,))
+        await q.edit_message_text("Chat mode closed. You can contact the admin again anytime from your Promoter Dashboard.", reply_markup=kb([[( "💬 Chat with admin","promoter_chat")],[( "⬅️ Promoter dashboard","promoter_stats")]]))
+    elif action == "promoter_withdraw_start":
+        with db() as c:
+            profile=c.execute("SELECT * FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
+            u=c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
+            joined=c.execute("SELECT COUNT(*) n FROM promoter_join_events WHERE promoter_user_id=?", (uid,)).fetchone()["n"]
+        if not profile:
+            await q.edit_message_text("Register for the promoter program first.", reply_markup=kb([[( "📢 Start promoter","promoter_start")]])); return
+        points=int(u["points"] or 0) if u else 0
+        target_required=setting_enabled("promoter_withdraw_require_target", True)
+        target=int(profile["target_count"]); completed=int(profile["completed_count"])
+        minimum=max(0,int(setting_value("promoter_withdraw_min_points","1000") or 0))
+        locked=(target_required and completed<target) or points<max(1,minimum)
+        status=(f"Verified referral joins: {completed}/{target}\nPoints available: {points}\nMinimum points to withdraw: {minimum if minimum else 'No minimum'}\nReferral target required: {'Yes' if target_required else 'No'}")
+        await q.edit_message_text("💸 PROMOTER WITHDRAWAL\n\n"+status+"\n\nChoose or update your payout method. Save your details now; withdrawal will be available when you meet the admin's rules.", reply_markup=kb([[( "📱 Telebirr","promoter_withdraw_method_telebirr")],[( "🏦 CBE Birr","promoter_withdraw_method_cbe")],[( "💸 Request withdrawal now","withdraw") if not locked and profile["account_number"] and profile["account_name"] else ( "🔒 Not eligible yet","promoter_withdraw_start")],[( "⬅️ Promoter dashboard","promoter_stats")]]))
+    elif action in ("promoter_withdraw_method_telebirr","promoter_withdraw_method_cbe"):
+        method="Telebirr" if action.endswith("telebirr") else "CBE Birr"
+        set_pending(uid,"promoter_withdraw_account_number",{"method":method})
+        if method=="Telebirr":
+            prompt="📱 Enter your Telebirr phone number. Use 09 followed by 8 digits (10 digits total), or +251 followed by 9 digits (12 characters total)."
+        else:
+            prompt="🏦 Enter your CBE account number using exactly 13 digits (numbers only)."
+        await q.edit_message_text(prompt,reply_markup=kb([[( "❌ Cancel","promoter_withdraw_start")]]))
     elif action == "withdraw":
         with db() as c:
             u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
@@ -3501,7 +3531,53 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub["status"] == "pending": rows.append([("✅ Save / Approve profile","promoter_ads_save_"+str(submission_id))])
         rows += [[("💬 Message user (text/photo)","promoter_ads_message_"+str(submission_id))],
                  [("🗑 Delete submission","promoter_ads_delete_confirm_"+str(submission_id))],
-                 [("⬅️ All submissions","promoter_ads_review")]]
+                 [("⬅️ All elif action == "admin_promoter_withdraw_limit":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        current=setting_value("promoter_withdraw_min_points","1000")
+        set_pending(uid,"admin_promoter_withdraw_limit_edit",{})
+        await q.edit_message_text(f"💰 SET PROMOTER WITHDRAWAL POINT LIMIT\n\nCurrent minimum: {current} points. Send a whole number. Send 0 to skip the point minimum (users still need at least 1 point).",reply_markup=kb([[( "❌ Cancel","admin_promoters")]]))
+    elif action == "admin_promoter_toggle_target_rule":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        new_value="0" if setting_enabled("promoter_withdraw_require_target",True) else "1"
+        with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('promoter_withdraw_require_target',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(new_value,))
+        await q.edit_message_text("✅ Referral target rule is now "+("ON. Users must reach their join target before withdrawing." if new_value=="1" else "OFF. Users do not need to reach the join target, but must meet the point limit."),reply_markup=kb([[( "⬅️ Promoter Program","admin_promoters")]]))
+    elif action == "admin_promoter_statistics":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            total=c.execute("SELECT COUNT(*) n FROM promoter_profiles").fetchone()["n"]
+            active=c.execute("SELECT COUNT(*) n FROM promoter_profiles WHERE status='active'").fetchone()["n"]
+            joins=c.execute("SELECT COUNT(*) n FROM promoter_join_events").fetchone()["n"]
+            pending=c.execute("SELECT COUNT(*) n FROM withdrawals WHERE status='pending' AND payout_method IN ('Telebirr','CBE','CBE Birr')").fetchone()["n"]
+            paid=c.execute("SELECT COALESCE(SUM(points),0) n FROM withdrawals WHERE status='approved' AND payout_method IN ('Telebirr','CBE','CBE Birr')").fetchone()["n"]
+        await q.edit_message_text(f"📈 PROMOTER STATISTICS\n\nRegistered promoter profiles: {total}\nActive profiles: {active}\nVerified referral joins: {joins}\nPending promoter withdrawals: {pending}\nPoints in approved withdrawals: {paid}\n\nWithdrawal minimum: {setting_value('promoter_withdraw_min_points','1000')} points\nTarget rule: {'ON' if setting_enabled('promoter_withdraw_require_target',True) else 'OFF'}",reply_markup=kb([[( "👥 View promoter users","admin_promoter_users")],[( "💬 Promoter chat inbox","admin_promoter_chat_inbox")],[( "⬅️ Promoter Program","admin_promoters")]]))
+    elif action == "admin_promoter_chat_inbox":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            profiles=c.execute("SELECT user_id,method,completed_count,target_count FROM promoter_profiles ORDER BY updated_at DESC LIMIT 30").fetchall()
+        rows=[[(f"💬 User {p['user_id']} · {p['completed_count']}/{p['target_count']} joins · {p['method']}",f"admin_promoter_chat_reply_{p['user_id']}")] for p in profiles]
+        rows += [[( "🔄 Refresh","admin_promoter_chat_inbox")],[( "⬅️ Promoter Program","admin_promoters")]]
+        await q.edit_message_text("💬 PROMOTER CHAT INBOX\nChoose a promoter to start or continue a conversation. You can send multiple text, photo, or document messages.",reply_markup=kb(rows))
+    elif action.startswith("admin_promoter_chat_reply_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: target_uid=int(action.removeprefix("admin_promoter_chat_reply_"))
+        except ValueError:
+            await q.edit_message_text("Invalid promoter ID."); return
+        with db() as c: exists=c.execute("SELECT user_id FROM promoter_profiles WHERE user_id=?",(target_uid,)).fetchone()
+        if not exists:
+            await q.edit_message_text("Promoter profile not found."); return
+        set_pending(uid,"admin_promoter_chat_reply",{"user_id":target_uid})
+        await q.edit_message_text(f"💬 Reply to promoter {target_uid}. Send text, a photo with caption, or a document. You can send multiple messages; use /done to finish.",reply_markup=kb([[( "✅ Finish reply","admin_promoter_chat_done")],[( "⬅️ Chat inbox","admin_promoter_chat_inbox")]]))
+    elif action == "admin_promoter_chat_done":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='admin_promoter_chat_reply'",(uid,))
+        await q.edit_message_text("Chat reply mode closed.",reply_markup=kb([[( "💬 Promoter chat inbox","admin_promoter_chat_inbox")],[( "⬅️ Promoter Program","admin_promoters")]]))
+    submissions","promoter_ads_review")]]
         await q.edit_message_text(body, reply_markup=kb(rows), disable_web_page_preview=True)
     elif action.startswith("promoter_ads_save_"):
         if not is_admin(uid):
