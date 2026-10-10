@@ -2780,6 +2780,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rows = [
             [(setting_value("buy_usdt_menu_button", "💵 Buy USDT | USDT ይግዙ"),"buy_usdt")],
             [("📱 Buy social media accounts","buy_accounts")],
+            [("🧾 My account purchases","account_my_purchases")],
             [("💸 Sell USDT | USDT ይሽጡ","sell_usdt")],
             [("📤 Sell a social media account","sell_social")],
         ]
