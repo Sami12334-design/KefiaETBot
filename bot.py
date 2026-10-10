@@ -380,6 +380,12 @@ def init_db():
           status TEXT NOT NULL DEFAULT 'pending_approval', created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL, admin_id INTEGER, admin_reply TEXT
         );
+        CREATE TABLE IF NOT EXISTS marketplace_messages(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, listing_id INTEGER NOT NULL,
+          user_id INTEGER NOT NULL, sender_role TEXT NOT NULL,
+          message_type TEXT NOT NULL DEFAULT 'text', message_text TEXT NOT NULL DEFAULT '',
+          file_id TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL
+        );
         """)
         # Marketplace account listings: add columns safely for existing SQLite databases.
         market_columns = {row["name"] for row in c.execute("PRAGMA table_info(market_listings)").fetchall()}
@@ -2815,6 +2821,38 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows.append([(f"#{item['id']} · {description} · {price_label}"[:62], f"account_view_{item['id']}")])
         rows.extend([[("⬅️ Choose platform","buy_accounts")],[("⬅️ Marketplace","market")]])
         await q.edit_message_text(f"📱 {platform} accounts available\n\nChoose an account to view its short description and price.", reply_markup=kb(rows))
+    elif action == "account_my_purchases":
+        with db() as c:
+            orders = c.execute("SELECT id,asset_type,price,purchase_status,payment_method FROM market_listings WHERE buyer_user_id=? AND action='sell_social' ORDER BY id DESC LIMIT 20",(uid,)).fetchall()
+        rows = [[(f"#{o['id']} · {o['asset_type']} · {o['purchase_status'].replace('_',' ').title()}",f"account_purchase_{o['id']}")] for o in orders]
+        rows.extend([[("📱 Browse accounts","buy_accounts")],[("⬅️ Marketplace","market")]])
+        await q.edit_message_text("🧾 MY ACCOUNT PURCHASES\n\nOpen an order to see its current status and messages from the admin.",reply_markup=kb(rows))
+    elif action.startswith("account_purchase_"):
+        try: listing_id=int(action.removeprefix("account_purchase_"))
+        except ValueError:
+            await q.edit_message_text("Invalid purchase."); return
+        with db() as c:
+            item=c.execute("SELECT id,asset_type,price,purchase_status,payment_method,buyer_user_id FROM market_listings WHERE id=? AND buyer_user_id=? AND action='sell_social'",(listing_id,uid)).fetchone()
+            messages=c.execute("SELECT sender_role,message_type,message_text,file_id,created_at FROM marketplace_messages WHERE listing_id=? AND user_id=? ORDER BY id DESC LIMIT 15",(listing_id,uid)).fetchall()
+        if not item:
+            await q.edit_message_text("Purchase not found.",reply_markup=kb([[("🧾 My purchases","account_my_purchases")]])); return
+        body=f"🧾 ACCOUNT ORDER #{listing_id}\nPlatform: {item['asset_type']}\nPrice: {item['price'] if item['price'] is not None else '—'} ETB\nPayment: {item['payment_method'] or '—'}\nStatus: {item['purchase_status'].replace('_',' ').title()}\n\n💬 RECENT MESSAGES\n"
+        if messages:
+            for m in reversed(messages):
+                label="Admin" if m["sender_role"]=="admin" else "You"
+                body+=f"\n{label} · {m['created_at']}\n{m['message_text'] or ('['+m['message_type']+' attachment]' if m['file_id'] else '')}"
+        else: body+="\nNo messages yet."
+        await q.edit_message_text(body[:3900],reply_markup=kb([[("💬 Message admin","account_chat_"+str(listing_id)],[("🔄 Refresh",f"account_purchase_{listing_id}")],[("⬅️ My purchases","account_my_purchases")]]))
+    elif action.startswith("account_chat_"):
+        try: listing_id=int(action.removeprefix("account_chat_"))
+        except ValueError:
+            await q.edit_message_text("Invalid purchase."); return
+        with db() as c:
+            item=c.execute("SELECT id FROM market_listings WHERE id=? AND buyer_user_id=? AND action='sell_social'",(listing_id,uid)).fetchone()
+        if not item:
+            await q.edit_message_text("Purchase not found."); return
+        set_pending(uid,"account_buyer_message",{"listing_id":listing_id})
+        await q.edit_message_text("💬 Send your message to the admin as text, a photo, or a document. Your message will be saved in this order's conversation.",reply_markup=kb([[("❌ Cancel",f"account_purchase_{listing_id}")]]))
     elif action.startswith("account_view_"):
         try: listing_id = int(action.removeprefix("account_view_"))
         except ValueError:
@@ -2827,7 +2865,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = f"{item['price']:g} ETB" if item["price"] is not None else "Price not set yet"
         await q.edit_message_text(
             f"📱 {item['asset_type']} account · #{item['id']}\n\n{description}\n\n💰 Price: {price}\n\n🔒 Never share account passwords or one-time verification codes in this chat. Confirm ownership and transfer terms with an admin.",
-            reply_markup=kb([[("🛒 Buy now",f"account_buy_{listing_id}")],[("⬅️ Back to listings",f"buy_accounts_{str(item['asset_type']).lower()}")],[("⬅️ Marketplace","market")]])
+            reply_markup=kb([[("🛒 Buy now",f"account_buy_{listing_id}")],[("🧾 My purchases","account_my_purchases")],[("⬅️ Back to listings",f"buy_accounts_{str(item['asset_type']).lower()}")],[("⬅️ Marketplace","market")]])
         )
     elif action.startswith("account_buy_"):
         try: listing_id = int(action.removeprefix("account_buy_"))
@@ -3152,6 +3190,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📊 Statistics","admin_stats"),("🏆 Task leaderboard","admin_task_leaderboard")],
             [("👥 Total Bot Users","admin_total_bot_users")],
             [("🛍 Social account listings","admin_marketplace")],
+            [("🏦 Account payment methods","admin_account_payments")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("💸 Manage Sell USDT","admin_sell_usdt")],
             [("⚙️ Set prices / limits","admin_settings")],
@@ -3762,6 +3801,17 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("Invalid user ID."); return
         set_pending(uid, "admin_promoter_message", {"user_id":promoter_uid})
         await q.edit_message_text(f"💬 Send the message you want to deliver to promoter {promoter_uid}.", reply_markup=kb([[("❌ Cancel",f"admin_promoter_user_{promoter_uid}")]]))
+    elif action == "admin_account_payments":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            gateways = c.execute("SELECT id,name,account_number,account_name,enabled FROM digital_payment_gateways ORDER BY name").fetchall()
+        rows = [[(f"{'🟢' if g['enabled'] else '🔴'} {g['name']} · {g['account_number'] or 'number not set'}",f"digital_admin_gateway_{g['id']}")] for g in gateways]
+        rows.extend([[("➕ Add / manage payment methods","admin_digital_products")],[("⬅️ Admin Dashboard","admin")]])
+        await q.edit_message_text(
+            "🏦 SOCIAL ACCOUNT PAYMENT METHODS\n\nThese methods are shared with the digital-products payment gateway manager. Open a method to edit its name, account number, account holder, instructions, warning, or enabled status. Only enabled methods are offered to buyers.\n\nIf no methods appear, open Add / manage payment methods to configure CBE and Telebirr first.",
+            reply_markup=kb(rows)
+        )
     elif action == "admin_marketplace":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -3774,7 +3824,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             price_label = f"{item['price']:g} ETB" if item["price"] is not None else "price unset"
             rows.append([(f"#{item['id']} · {item['asset_type']} · {state} · {price_label}"[:62],f"admin_market_item_{item['id']}")])
         rows.extend([[("🔄 Refresh","admin_marketplace")],[("⬅️ Admin Dashboard","admin")]])
-        await q.edit_message_text("🛍 SOCIAL ACCOUNT LISTINGS\n\nOpen a listing to edit its short description and price, publish/hide it, or message its seller/buyer. A listing must be approved and priced before publishing.", reply_markup=kb(rows))
+        rows.insert(0,[("🏦 Configure payment methods","admin_account_payments")])
+        await q.edit_message_text("🛍 SOCIAL ACCOUNT LISTINGS\n\nManage account listings and orders. Open an order to review receipts, approve/reject purchases, or reply to the buyer. Text, photos, and documents are saved to the buyer's order conversation.", reply_markup=kb(rows))
     elif action.startswith("admin_market_item_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -4146,15 +4197,52 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("The message recipient was not found."); return
         try:
             if message.photo:
-                await context.bot.send_photo(target_user, message.photo[-1].file_id, caption=f"📩 Message from KefiaETBot admin about social account listing #{listing_id}")
+                file_id=message.photo[-1].file_id
+                await context.bot.send_photo(target_user,file_id,caption=f"📩 Message from KefiaETBot admin about social account listing #{listing_id}\n{message.caption or ''}")
+                msg_type="photo"
             elif message.document:
-                await context.bot.send_document(target_user, message.document.file_id, caption=f"📩 Message from KefiaETBot admin about social account listing #{listing_id}")
+                file_id=message.document.file_id
+                await context.bot.send_document(target_user,file_id,caption=f"📩 Message from KefiaETBot admin about social account listing #{listing_id}\n{message.caption or ''}")
+                msg_type="document"
+            elif value:
+                file_id=""
+                await context.bot.send_message(target_user,f"📩 Message from KefiaETBot admin about social account listing #{listing_id}:\n\n{value}")
+                msg_type="text"
             else:
-                await message.reply_text("Please send a photo or document."); return
-            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text("Please send text, a photo, or a document."); return
+            with db() as c:
+                c.execute("INSERT INTO marketplace_messages(listing_id,user_id,sender_role,message_type,message_text,file_id,created_at) VALUES(?,?,'admin',?,?,?,?)",(listing_id,target_user,msg_type,value or message.caption or "",file_id,now()))
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
             await message.reply_text("✅ Media message sent.", reply_markup=kb([[("⬅️ Listing details",f"admin_market_item_{listing_id}")]]))
         except Exception:
             await message.reply_text("Could not deliver the media. The user may have blocked the bot.")
+        return
+
+    if current_pending and current_pending["action"] == "account_buyer_message":
+        state=decode_pending(current_pending["data"])
+        try: listing_id=int(state.get("listing_id",0))
+        except (TypeError,ValueError): listing_id=0
+        with db() as c:
+            item=c.execute("SELECT id FROM market_listings WHERE id=? AND buyer_user_id=? AND action='sell_social'",(listing_id,user.id)).fetchone()
+        if not item:
+            await message.reply_text("This purchase was not found."); return
+        if message.photo: msg_type,file_id="photo",message.photo[-1].file_id
+        elif message.document: msg_type,file_id="document",message.document.file_id
+        elif value: msg_type,file_id="text",""
+        else:
+            await message.reply_text("Send text, a photo, or a document."); return
+        with db() as c:
+            c.execute("INSERT INTO marketplace_messages(listing_id,user_id,sender_role,message_type,message_text,file_id,created_at) VALUES(?,?,'buyer',?,?,?,?)",(listing_id,user.id,msg_type,value or message.caption or "",file_id,now()))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+        note=f"💬 BUYER MESSAGE · Social account #{listing_id}\nUser ID: {user.id}\n"+(value or message.caption or "[attachment]")
+        for aid in ADMIN_IDS:
+            try:
+                if msg_type=="photo": await context.bot.send_photo(aid,file_id,caption=note[:1024])
+                elif msg_type=="document": await context.bot.send_document(aid,file_id,caption=note[:1024])
+                else: await context.bot.send_message(aid,note)
+                await context.bot.send_message(aid,"Reply from the Social account listings dashboard.",reply_markup=kb([[("🛍 Open account order",f"admin_market_item_{listing_id}")]]))
+            except Exception: log.warning("Could not forward social account buyer message to admin %s",aid)
+        await message.reply_text("✅ Message sent. You can return to My account purchases to read the admin's reply.",reply_markup=kb([[("🧾 My account purchases","account_my_purchases")],[("🏠 Dashboard","home")]]))
         return
 
     # Buyer payment proof for a social account listing.
@@ -4176,7 +4264,9 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("UPDATE market_listings SET receipt_file_id=?,receipt_type=?,purchase_status='receipt_submitted' WHERE id=? AND buyer_user_id=?",
                       (receipt_file_id,receipt_type,listing_id,user.id))
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
-        await message.reply_text(f"✅ Payment screenshot submitted for account #{listing_id}. An admin will verify the payment manually before completing the purchase.")
+        with db() as c:
+            c.execute("INSERT INTO marketplace_messages(listing_id,user_id,sender_role,message_type,message_text,file_id,created_at) VALUES(?,?,'buyer','receipt',?,?,?)",(listing_id,user.id,message.caption or "Payment proof submitted",receipt_file_id,now()))
+        await message.reply_text(f"✅ Payment screenshot submitted for account #{listing_id}. Please wait for admin approval. Return to Marketplace → My account purchases to view updates and messages.")
         caption = (f"SOCIAL ACCOUNT PURCHASE #{listing_id}\nBuyer: {user.id}\nSeller: {item['user_id']}\n"
                    f"Platform: {item['asset_type']}\nPrice: {item['price']} ETB\nPayment: {item['payment_method']}\n"
                    "Status: receipt submitted — verify the actual transfer before approving.")
