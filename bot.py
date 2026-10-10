@@ -4808,7 +4808,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             vals = state.get("values",{})
             if step == "id":
-                import re
                 if not re.fullmatch(r"[A-Za-z0-9_]{2,16}", raw):
                     await message.reply_text("Use 2–16 English letters, numbers, or underscores. Example: gemini_pro_1m")
                     return
@@ -4889,7 +4888,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             vals = state.get("values",{})
             if step == "id":
-                import re
                 if not re.fullmatch(r"[A-Za-z0-9_]{2,16}", raw):
                     await message.reply_text("Use 2–16 English letters, numbers, or underscores. Example: telebirr")
                     return
