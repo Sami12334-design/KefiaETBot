@@ -66,7 +66,7 @@ class PostgreSQLCursor:
         match = re.match(r"^\s*INSERT\s+INTO\s+([a-zA-Z_][a-zA-Z0-9_]*)", sql, re.I)
         if match and match.group(1).lower() in {
             "tasks", "task_claims", "invite_events", "ad_requests",
-            "promoter_join_events", "market_listings", "withdrawals",
+            "promoter_join_events", "promoter_ad_submissions", "market_listings", "withdrawals",
             "crypto_orders", "digital_orders",
         } and not re.search(r"\bRETURNING\b", sql, re.I):
             sql = sql.rstrip().rstrip(";") + " RETURNING id"
