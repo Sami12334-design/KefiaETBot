@@ -2601,7 +2601,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("⛔ Admin access only."); return
         with db() as c:
             rows = c.execute(
-                "SELECT u.user_id,u.username,u.first_name,u.points,COUNT(r.invited_user_id) referral_count,"
+                "SELECT u.user_id,u.username,u.first_name,u.points,"
+                "(SELECT COUNT(*) FROM users referred WHERE referred.referred_by=u.user_id) referral_count,"
                 "COALESCE(SUM(r.points_awarded),0) earned "
                 "FROM users u LEFT JOIN referral_rewards r ON r.inviter_user_id=u.user_id "
                 "WHERE EXISTS (SELECT 1 FROM users referred WHERE referred.referred_by=u.user_id) "
