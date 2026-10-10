@@ -3543,6 +3543,12 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         new_value="0" if setting_enabled("promoter_withdraw_require_target",True) else "1"
         with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('promoter_withdraw_require_target',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(new_value,))
         await q.edit_message_text("✅ Referral target rule is now "+("ON. Users must reach their join target before withdrawing." if new_value=="1" else "OFF. Users do not need to reach the join target, but must meet the point limit."),reply_markup=kb([[( "⬅️ Promoter Program","admin_promoters")]]))
+    elif action == "admin_promoter_toggle_chat":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        new_value="0" if setting_enabled("promoter_chat_enabled",True) else "1"
+        with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('promoter_chat_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(new_value,))
+        await q.edit_message_text("Promoter chat is now "+("enabled." if new_value=="1" else "disabled for users."),reply_markup=kb([[( "⬅️ Promoter Program","admin_promoters")]]))
     elif action == "admin_promoter_statistics":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -3644,6 +3650,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("💰 Set withdrawal point limit","admin_promoter_withdraw_limit")],
             [("🔒 Require referral target: " + ("ON" if setting_enabled("promoter_withdraw_require_target", True) else "OFF"),"admin_promoter_toggle_target_rule")],
             [("💬 Promoter chat inbox","admin_promoter_chat_inbox")],
+            [("🔴 Disable promoter chat" if setting_enabled("promoter_chat_enabled", True) else "🟢 Enable promoter chat","admin_promoter_toggle_chat")],
             [("📈 Promoter statistics","admin_promoter_statistics")],
             [("👥 View promoter users","admin_promoter_users")],
             [("⬅️ Admin Dashboard","admin")]
@@ -3698,7 +3705,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                f"Tracked joins: {joined}\nPoints per join: {profile['points_per_join']}\nPayout: {profile['method']}\n"
                f"Account number: {profile['account_number']}\nAccount holder: {profile['account_name']}\nInvite link: {profile['invite_link'] or 'Not created'}")
         await q.edit_message_text(msg, reply_markup=kb([
-            [("💬 Message user",f"admin_promoter_message_{promoter_uid}")],
+            [("💬 Chat with user (text/photo)",f"admin_promoter_chat_reply_{promoter_uid}")],
             [("✏️ Edit payout method",f"admin_promoter_edit_method_{promoter_uid}")],
             [("✏️ Edit account number",f"admin_promoter_edit_number_{promoter_uid}")],
             [("✏️ Edit account holder",f"admin_promoter_edit_name_{promoter_uid}")],
