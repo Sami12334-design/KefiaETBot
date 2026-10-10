@@ -2305,22 +2305,66 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         state = decode_pending(pending["data"])
         period = action.removeprefix("promoter_market_price_")
         if period == "done":
-            if not state.get("prices"):
-                await q.answer("Set a price for at least one period first.", show_alert=True); return
-            with db() as c:
-                cur = c.execute(
-                    "INSERT INTO promoter_ad_submissions(user_id,platforms,content_type,followers,channel_link,price_day,price_week,price_month,status,created_at,updated_at) "
-                    "VALUES(?,?,?,?,?,?,?,?, 'pending',?,?)",
-                    (uid, ", ".join(state["platforms"]), state["content_type"], int(state["followers"]), state["channel_link"],
-                     state["prices"].get("day"), state["prices"].get("week"), state["prices"].get("month"), now(), now())
+            # Validate every required field before creating a review request.
+            platforms = state.get("platforms") or []
+            content_type = str(state.get("content_type") or "").strip()
+            channel_link = str(state.get("channel_link") or "").strip()
+            prices = state.get("prices") or {}
+            try:
+                followers = int(state.get("followers", -1))
+                valid_prices = {
+                    key: float(value) for key, value in prices.items()
+                    if key in {"day", "week", "month"} and math.isfinite(float(value)) and float(value) > 0
+                }
+            except (TypeError, ValueError):
+                followers, valid_prices = -1, {}
+            if not platforms or not content_type or not channel_link or followers < 0 or not valid_prices:
+                await q.answer("Your application is incomplete. Please finish each step and set at least one valid price.", show_alert=True)
+                await q.edit_message_text(
+                    "⚠️ Your promoter application is incomplete. Please review the form and submit again.",
+                    reply_markup=kb([[("📢 Restart promoter form","promoter_market_start")], [("⬅️ Promotion Center","ads")]])
                 )
-                submission_id = cur.lastrowid
-                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
-            await q.edit_message_text(f"✅ Promoter submission #{submission_id} sent to admins for review. You can return to the Promotion Center anytime.", reply_markup=kb([[("📣 Promotion Center","ads")],[("🏠 Dashboard","home")]]))
-            await notify_admins(context, f"📣 NEW PROMOTER SUBMISSION #{submission_id}\nUser: {uid}\nPlatforms: {', '.join(state['platforms'])}\nContent: {state['content_type']}\nFollowers: {state['followers']}\nLink: {state['channel_link']}\nPrices: day={state['prices'].get('day','—')} ETB, week={state['prices'].get('week','—')} ETB, month={state['prices'].get('month','—')} ETB\nReview in Admin Dashboard → Promoter submissions.")
+                return
+            try:
+                with db() as c:
+                    # Avoid creating duplicate pending applications when a user taps twice.
+                    existing = c.execute(
+                        "SELECT id FROM promoter_ad_submissions WHERE user_id=? AND status='pending' ORDER BY id DESC LIMIT 1",
+                        (uid,)
+                    ).fetchone()
+                    if existing:
+                        submission_id = int(existing["id"])
+                        c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+                    else:
+                        cur = c.execute(
+                            "INSERT INTO promoter_ad_submissions(user_id,platforms,content_type,followers,channel_link,price_day,price_week,price_month,status,created_at,updated_at) "
+                            "VALUES(?,?,?,?,?,?,?,?, 'pending',?,?)",
+                            (uid, ", ".join(str(p) for p in platforms), content_type, followers, channel_link,
+                             valid_prices.get("day"), valid_prices.get("week"), valid_prices.get("month"), now(), now())
+                        )
+                        submission_id = cur.lastrowid
+                        c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+            except Exception:
+                log.exception("Failed to save promoter application for user %s", uid)
+                await q.edit_message_text(
+                    "⚠️ We couldn't submit your application because of a temporary error. Your form may still be available; please tap Submit for admin review again in a moment.",
+                    reply_markup=kb([[("🔄 Try submit again","promoter_market_price_done")], [("⬅️ Promotion Center","ads")]])
+                )
+                return
+            await q.edit_message_text(
+                f"✅ Your promoter application #{submission_id} has been submitted for admin review.\n\nAdmins will review your platforms, channel details, follower count, and prices. You can check the Promotion Center later.",
+                reply_markup=kb([[("📣 Promotion Center","ads")], [("🏠 Dashboard","home")]])
+            )
+            try:
+                await notify_admins(
+                    context,
+                    f"📣 NEW PROMOTER SUBMISSION #{submission_id}\nUser: {uid}\nPlatforms: {', '.join(str(p) for p in platforms)}\nContent: {content_type}\nFollowers: {followers}\nLink: {channel_link}\nPrices: day={valid_prices.get('day','—')} ETB, week={valid_prices.get('week','—')} ETB, month={valid_prices.get('month','—')} ETB\nReview in Admin Dashboard → Promoter submissions."
+                )
+            except Exception:
+                log.exception("Promoter application %s saved but admin notification failed", submission_id)
             return
         if period not in {"day","week","month"}:
-            await q.edit_message_text("Unknown price period."); return
+            await q.answer("Unknown price period.", show_alert=True); return
         if period in state.get("prices", {}):
             await q.answer("You already set this period's price. Choose another period or submit.", show_alert=True); return
         state["price_period"] = period
