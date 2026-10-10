@@ -850,8 +850,7 @@ async def start_crypto_flow(q, context, side):
         )
         return
     await q.edit_message_text(
-        "💸 Sell USDT — Step 1\n\nHow would you like to receive your ETB payout?\n"
-        "ብር ይቀበሉበታል የሚፈልጉትን የክፍያ መንገድ ይምረጡ:",
+        setting_value("sell_payout_prompt", "💸 Sell USDT\n\nHow would you like to receive your ETB payout?\nብር ይቀበሉበት የሚፈልጉትን የክፍያ መንገድ (ባንክ ወይም Telebirr) ይምረጡ:\n\nChoose CBE, Telebirr, Bank of Abyssinia, or another Ethiopian bank."),
         reply_markup=kb(rows),
     )
 
@@ -936,14 +935,9 @@ async def show_sell_networks(q, payout):
         rate_lines = rates_text("sell")
         rows = [[(label, f"sell_network_{slug}")] for slug, label in networks]
         rows.append([("❌ Cancel | አቋርጥ", "home")])
-        summary = (
-            f"💸 Sell USDT — Choose deposit method\n\n"
-            f"Your ETB payout destination\n• Method: {PAYMENT_METHODS.get(payout.get('method'), payout.get('method', '—'))}\n"
-            f"• Account number: {payout.get('account_number', '—')}\n"
-            f"• Account name: {payout.get('account_name', '—')}\n\n"
-            f"📉 Sell USDT Rates\n{rate_lines}\n\n"
-            f"How will you send the USDT?"
-        )
+        payout_summary = f"• Method: {PAYMENT_METHODS.get(payout.get('method'), payout.get('method', '—'))}\n• Phone/account number: {payout.get('account_number', '—')}\n• Account name: {payout.get('account_name', '—')}"
+        template = setting_value("sell_deposit_prompt", "💸 Step 3 of 4 — Choose USDT deposit method | ደረጃ 3 — የUSDT ማስገቢያ መንገድ ይምረጡ\n\nYour ETB payout destination | የብር መቀበያ መረጃዎ\n{payout_summary}\n\n📈 Sell USDT Rates\n{rates}\n\nHow will you send the USDT? USDT ለአድሚኑ በምን መንገድ ይልካሉ?")
+        summary = render_digital_template(template, {"payout_summary":payout_summary,"method":PAYMENT_METHODS.get(payout.get('method'),payout.get('method','—')),"account_number":payout.get('account_number','—'),"account_name":payout.get('account_name','—'),"rates":rate_lines})
     await q.edit_message_text(summary, reply_markup=kb(rows))
 
 
@@ -1099,8 +1093,7 @@ async def crypto_callback(update, context, action):
             return
         set_pending(uid, "sell_account_number", {"method": slug})
         await q.edit_message_text(
-            f"💸 Sell USDT — Step 2\n{PAYMENT_METHODS[slug]} details\n\n"
-            "Enter the account number where you want to receive ETB. Use digits only:",
+            setting_value("sell_account_number_prompt", "💸 Step 2 — Enter the account/phone number where you want to receive ETB.") + f"\n\n{PAYMENT_METHODS[slug]}",
             reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
         )
         return
@@ -1133,9 +1126,9 @@ async def crypto_callback(update, context, action):
             return
         payout.update({"network": slug, "destination": destination})
         set_pending(uid, "sell_amount", payout)
-        await q.edit_message_text(
-            f"💸 Sell USDT — Enter amount\nDeposit method: {SELL_NETWORKS[slug]}\n"
-            f"Current sell rates:\n{rates_text('sell')}\n\nEnter the amount of USDT you will send (minimum 1 USDT).",
+        amount_prompt = setting_value("sell_amount_prompt", "💸 Enter the amount of USDT you will send.\nDeposit method: {network}\nCurrent sell rates:\n{rates}\n\nMinimum 1 USDT.")
+        amount_prompt = render_digital_template(amount_prompt, {"network":SELL_NETWORKS[slug],"rates":rates_text("sell")})
+        await q.edit_message_text(amount_prompt,
             reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
         )
         return
@@ -1342,7 +1335,7 @@ async def handle_crypto_text(update, context, action, data, value):
         state["account_number"] = digits
         set_pending(uid, "sell_account_name", state)
         await message.reply_text(
-            "Enter the account holder name exactly as registered with the bank/Telebirr:",
+            setting_value("sell_account_name_prompt", "👤 Enter the account holder name exactly as registered with the bank/Telebirr:"),
             reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
         )
         return True
@@ -1361,10 +1354,10 @@ async def handle_crypto_text(update, context, action, data, value):
             )
         set_pending(uid, "sell_network_select", state)
         await message.reply_text("✅ Payout details saved for next time.")
-        await message.reply_text(
-            f"💸 Sell USDT — Choose deposit method\n\nPayout method: {PAYMENT_METHODS.get(state['method'], state['method'])}\n"
-            f"Account number: {state['account_number']}\nAccount name: {state['account_name']}\n\n"
-            f"📉 Sell USDT rates:\n{rates_text('sell')}\n\nChoose how you will send USDT:",
+        payout_summary = f"• Method: {PAYMENT_METHODS.get(state['method'], state['method'])}\n• Phone/account number: {state['account_number']}\n• Account name: {state['account_name']}"
+        deposit_prompt = setting_value("sell_deposit_prompt", "💸 Step 3 of 4 — Choose USDT deposit method | ደረጃ 3 — የUSDT ማስገቢያ መንገድ ይምረጡ\n\nYour ETB payout destination | የብር መቀበያ መረጃዎ\n{payout_summary}\n\n📈 Sell USDT Rates\n{rates}\n\nHow will you send the USDT?")
+        deposit_prompt = render_digital_template(deposit_prompt, {"payout_summary":payout_summary,"method":PAYMENT_METHODS.get(state['method'],state['method']),"account_number":state['account_number'],"account_name":state['account_name'],"rates":rates_text("sell")})
+        await message.reply_text(deposit_prompt,
             reply_markup=kb([[(label, f"sell_network_{slug}")] for slug, label in enabled_sell_networks()] + [[("❌ Cancel | አቋርጥ", "home")]]),
         )
         return True
@@ -1391,14 +1384,55 @@ async def handle_crypto_text(update, context, action, data, value):
             )
             order_id = cur.lastrowid
             c.execute("UPDATE pending_inputs SET action='sell_receipt',data=? WHERE user_id=?", (json.dumps({"order_id": order_id}), uid))
-        await message.reply_text(
-            f"💸 Sell USDT — Order #{order_id}\nAmount: {amount:g} USDT\nSell rate: {rate:g} ETB/USDT\n"
-            f"Expected ETB payout: {total:g} ETB\n\nSend USDT using {SELL_NETWORKS.get(state['network'], state['network'])} to:\n"
-            f"{state['destination']}\n\nAfter sending, upload a clear transfer screenshot showing amount, status, recipient, time, and transaction/order ID. "
-            "The admin will verify the transfer before sending your ETB payout.",
-            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        receipt_prompt = setting_value("sell_receipt_prompt", "💸 Step 4 of 4 — {network}\n\nSend USDT to this Binance Pay ID / destination: {destination}\n\nAmount: {amount} USDT\nRate: {rate} ETB/USDT\nExpected ETB payout: {total} ETB\n\nUpload a clear transfer screenshot showing amount, status, recipient, time, and order ID.")
+        receipt_prompt = render_digital_template(receipt_prompt, {"order_id":order_id,"amount":f"{amount:g}","rate":f"{rate:g}","total":f"{total:g}","network":SELL_NETWORKS.get(state['network'],state['network']),"destination":state['destination']})
+        await message.reply_text(receipt_prompt,
+            reply_markup=kb([[("💬 Message admin about this order",f"sell_user_chat_{order_id}")],[("❌ Cancel | አቋርጥ", "home")]]),
         )
         return True
+
+    if action == "sell_admin_setting":
+        if not is_admin(uid): await message.reply_text("⛔ Admin access only."); return True
+        key=str(state.get("key","")); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
+        if key.startswith("sell_network_") and key.endswith("_destination"): allowed.add(key)
+        if key not in allowed: await message.reply_text("Invalid setting."); return True
+        saved="" if value.lower() in {"off","none"} else value
+        if key.startswith("sell_usdt_rate_"):
+            try:
+                n=Decimal(saved)
+                if not n.is_finite() or n<=0: raise ValueError()
+            except (ValueError,InvalidOperation): await message.reply_text("Enter a valid rate greater than zero."); return True
+        if len(saved)>3500: await message.reply_text("Keep the value under 3,500 characters."); return True
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(key,saved)); c.execute("DELETE FROM pending_inputs WHERE user_id=?",(uid,))
+        await message.reply_text(f"✅ Saved {key}.",reply_markup=kb([[("💸 Sell USDT Management","admin_sell_usdt")],[("📝 Customer messages","sell_admin_messages")]])); return True
+    if action == "sell_admin_chat":
+        if not is_admin(uid): await message.reply_text("⛔ Admin access only."); return True
+        oid=int(state.get("order_id",0)); target=int(state.get("target_user_id",0))
+        try:
+            if message.photo: await context.bot.send_photo(target,message.photo[-1].file_id,caption=f"📩 Admin · Sell USDT order #{oid}\n{message.caption or ''}"[:1024])
+            elif message.document: await context.bot.send_document(target,message.document.file_id,caption=f"📩 Admin · Sell USDT order #{oid}\n{message.caption or ''}"[:1024])
+            elif value: await context.bot.send_message(target,f"📩 Admin · Sell USDT order #{oid}\n\n{value}")
+            else: await message.reply_text("Send text, photo, or document."); return True
+        except Exception: await message.reply_text("Could not deliver reply."); return True
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(uid,))
+        await message.reply_text("✅ Reply delivered to user."); return True
+    if action == "sell_user_chat":
+        oid=int(state.get("order_id",0))
+        with db() as c: order=c.execute("SELECT id FROM crypto_orders WHERE id=? AND user_id=? AND side='sell'",(oid,uid)).fetchone()
+        if not order: await message.reply_text("Order not found."); return True
+        note=f"💬 SELL USDT USER MESSAGE · order #{oid}\nUser ID: {uid}\n"; delivered=False
+        for aid in ADMIN_IDS:
+            try:
+                if message.photo: await context.bot.send_photo(aid,message.photo[-1].file_id,caption=(note+(message.caption or ""))[:1024])
+                elif message.document: await context.bot.send_document(aid,message.document.file_id,caption=(note+(message.caption or ""))[:1024])
+                elif value: await context.bot.send_message(aid,note+"\n"+value)
+                else: continue
+                await context.bot.send_message(aid,"Reply to this user:",reply_markup=kb([[("💬 Reply to user",f"sell_admin_reply_{oid}")],[("📋 Open order",f"sell_admin_order_{oid}")]])); delivered=True
+            except Exception: log.exception("Could not forward Sell USDT message")
+        if not delivered: await message.reply_text("Could not deliver the message to admin."); return True
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(uid,))
+        await message.reply_text("✅ Message sent to admin. Replies arrive here."); return True
 
     if action == "crypto_delivery":
         if not is_admin(uid):
@@ -4111,7 +4145,8 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text(render_digital_template(setting_value("buy_usdt_confirmation_template", ""), vals))
             caption = render_digital_template(setting_value("buy_usdt_admin_order_template", ""), vals)
         else:
-            await message.reply_text(f"✅ Screenshot received for order #{order_id}. Admin will verify the actual transfer before completing your order.")
+            confirmation=setting_value("sell_confirmation_message","✅ Screenshot received for Sell USDT order #{order_id}. Admin will verify the transfer and message you here.")
+            await message.reply_text(render_digital_template(confirmation,{"order_id":order_id,"amount":f"{order['amount_usdt']:g}","rate":f"{order['rate_etb']:g}","total":f"{order['total_etb']:g}"}),reply_markup=kb([[("💬 Message admin about this order",f"sell_user_chat_{order_id}")]]))
             caption = (f"🪙 {order['side'].upper()} USDT order #{order_id}\nUser: {user.id}\n"
                        f"Amount: {order['amount_usdt']:g} USDT\nETB total: {order['total_etb']:g}\n"
                        "Status: pending admin approval. Verify the real transaction independently.")
