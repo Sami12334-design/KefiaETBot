@@ -2574,7 +2574,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             rows = c.execute("SELECT id,kind,status,quoted_price FROM ad_requests WHERE user_id=? ORDER BY id DESC LIMIT 10", (uid,)).fetchall()
         msg = "📋 Your ad requests\n" + ("\n".join(f"#{r['id']} · {r['kind']} · {r['status']} · {r['quoted_price'] if r['quoted_price'] is not None else 'quote pending'} ETB" for r in rows) if rows else "No ad requests yet.")
-        await q.edit_message_text(msg, reply_markup=kb([[("⬅️ Promotions","ads")],[("⬅️ Dashboard","home")]]))
+        buttons = [[("💬 Message admin · request #" + str(r["id"]), "advertiser_chat_" + str(r["id"]))] for r in rows]
+        buttons.extend([[("🛍 New advertisement","advertiser_start")],[("⬅️ Promotions","ads")],[("⬅️ Dashboard","home")]])
+        await q.edit_message_text(msg, reply_markup=kb(buttons))
     elif action == "market":
         rows = [
             [(setting_value("buy_usdt_menu_button", "💵 Buy USDT | USDT ይግዙ"),"buy_usdt")],
@@ -5526,7 +5528,7 @@ def main():
     app.add_handler(ChatMemberHandler(track_channel_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(log_own_membership_change, ChatMemberHandler.MY_CHAT_MEMBER))
     app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_task_message_media), group=-2)
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_receipt_media))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.ANIMATION | filters.Document.ALL, handle_receipt_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
     log.info("KefiaETBot starting")
