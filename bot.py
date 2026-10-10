@@ -2051,11 +2051,38 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for token, replacement in replacements.items():
             template = template.replace(token, replacement)
         msg = template
-        await q.edit_message_text(msg, reply_markup=kb([
+        task_markup = kb([
             [("🔄 Refresh progress",f"task_{tid}")],
             [("🏆 Task leaderboard",f"public_task_leaderboard_{tid}")],
             [("🧩 More tasks","jobs"),("🏠 Dashboard","home")]
-        ]))
+        ])
+        media_raw = setting_value(f"task_message_media_{tid}", "")
+        try:
+            media_info = json.loads(media_raw) if media_raw else None
+        except (TypeError, ValueError):
+            media_info = None
+        if isinstance(media_info, dict) and media_info.get("file_id") and media_info.get("kind") in {"photo","video","document"}:
+            # Render the task template in the caption where Telegram's 1024-char caption
+            # limit allows it. Long templates remain as a separate full text message.
+            media_caption = msg if len(msg) <= 1024 else None
+            try:
+                send_kwargs = {"chat_id": uid, "reply_markup": task_markup}
+                if media_info["kind"] == "photo":
+                    await context.bot.send_photo(photo=media_info["file_id"], caption=media_caption, **send_kwargs)
+                elif media_info["kind"] == "video":
+                    await context.bot.send_video(video=media_info["file_id"], caption=media_caption, **send_kwargs)
+                else:
+                    await context.bot.send_document(document=media_info["file_id"], caption=media_caption, **send_kwargs)
+                try:
+                    await q.message.delete()
+                except Exception:
+                    pass
+                if len(msg) > 1024:
+                    await context.bot.send_message(chat_id=uid, text=msg, reply_markup=task_markup)
+                return
+            except Exception:
+                log.exception("Could not send configured media for task %s", tid)
+        await q.edit_message_text(msg, reply_markup=task_markup)
     elif action == "invite":
         if str(setting_value("invite_earn_active", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
             unavailable_message = str(setting_value(
@@ -2692,15 +2719,19 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not task:
             await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
         template = setting_value(f"task_message_template_{tid}", default_task_message_template())
+        media_raw = setting_value(f"task_message_media_{tid}", "")
+        try:
+            media_info = json.loads(media_raw) if media_raw else None
+        except (TypeError, ValueError):
+            media_info = None
+        media_status = f"Attached media: {media_info.get('kind', 'file')} (send a new file to replace it)." if isinstance(media_info, dict) else "Attached media: none."
         prompt = (
             f"✍️ EDIT CUSTOMER MESSAGE · TASK #{tid} — {task['title']}\n\n"
-            "Edit the complete message shown to users when they open this task. You can add new information, update any wording, or remove lines by changing the template below. "
-            "This is the main place to manage the default task information users see.\n\n"
-            "IMPORTANT: Keep {{PERSONAL_INVITE_LINK}} exactly once. The bot automatically replaces it with each participant's own personal invite link, so this marker is protected and cannot be removed.\n\n"
-            "Available placeholders (keep the braces):\n"
-            "{title} · {points} · {channel} · {completed_count} · {target} · {participants} · {status}\n\n"
-            "Send the complete updated message, not only the part you want to change. Maximum 3000 characters. "
-            "Choose Cancel to leave without saving, or use “Reset message to default” from the task control panel to restore the original message.\n\n"
+            "Send a new text template to edit the message, OR attach an image, video, APK, or PDF to attach/replace the task media. "
+            "When sending media, its optional caption is saved with the file; the existing text template is kept.\n\n"
+            "IMPORTANT: Text templates must keep {{PERSONAL_INVITE_LINK}} exactly once. The bot replaces it with each participant's own personal invite link.\n\n"
+            "Available placeholders: {title} · {points} · {channel} · {completed_count} · {target} · {participants} · {status}\n"
+            "Text template limit: 3000 characters. " + media_status + "\n\n"
             "CURRENT MESSAGE TEMPLATE:\n" + template
         )
         set_pending(uid, "admin_task_message_template", {"task_id":tid})
@@ -2725,7 +2756,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             task = c.execute("SELECT id FROM tasks WHERE id=?", (tid,)).fetchone()
             if task:
-                c.execute("DELETE FROM settings WHERE key=?", (f"task_message_template_{tid}",))
+                c.execute("DELETE FROM settings WHERE key IN (?,?)",
+                          (f"task_message_template_{tid}", f"task_message_media_{tid}"))
         if not task:
             await q.edit_message_text("Task not found.", reply_markup=kb([[("📋 Manage tasks","admin_tasks")]])); return
         await q.edit_message_text("♻️ Customer message reset to the default template. The personal invite link remains automatically generated.", reply_markup=kb([[("📋 Review task",f"admintask_view_{tid}")],[("📋 Manage tasks","admin_tasks")]]))
@@ -4082,6 +4114,61 @@ async def handle_digital_admin_command(update, context, value):
     return False
 
 
+async def handle_task_message_media(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Save an admin-supplied image, video, APK, or PDF for a task's user-facing message."""
+    user = update.effective_user
+    message = update.effective_message
+    if not user or not message or not is_admin(user.id):
+        return
+    with db() as c:
+        pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+    if not pending or pending["action"] != "admin_task_message_template":
+        return
+    state = decode_pending(pending["data"])
+    try:
+        tid = int(state.get("task_id", 0))
+    except (TypeError, ValueError):
+        tid = 0
+    with db() as c:
+        task = c.execute("SELECT id,title FROM tasks WHERE id=?", (tid,)).fetchone() if tid > 0 else None
+    if not task:
+        await message.reply_text("This task edit expired. Open Manage Tasks and try again.")
+        return
+    file_id = ""
+    kind = ""
+    if message.photo:
+        file_id, kind = message.photo[-1].file_id, "photo"
+    elif message.video:
+        file_id, kind = message.video.file_id, "video"
+    elif message.document:
+        document = message.document
+        filename = (document.file_name or "").lower()
+        mime = (document.mime_type or "").lower()
+        if filename.endswith((".apk", ".pdf")) or mime in {"application/vnd.android.package-archive", "application/pdf"}:
+            kind, file_id = "document", document.file_id
+        else:
+            await message.reply_text("Please attach an image, video, APK, or PDF file.")
+            return
+    else:
+        await message.reply_text("Please attach an image, video, APK, or PDF file.")
+        return
+    media_info = {
+        "kind": kind,
+        "file_id": file_id,
+        "caption": (message.caption or "").strip()[:1024],
+        "file_name": message.document.file_name if message.document else None,
+    }
+    with db() as c:
+        c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                  (f"task_message_media_{tid}", json.dumps(media_info, ensure_ascii=False)))
+    await message.reply_text(
+        f"✅ Media attached to task #{tid} — {task['title']}. Users will see it when they open the task. "
+        "Send another supported file to replace it, send text to update the message template, or press Cancel.",
+        reply_markup=kb([[("📋 Review task", f"admintask_view_{tid}")],
+                         [("Cancel", f"admintask_message_cancel_{tid}")]])
+    )
+
+
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
@@ -5204,6 +5291,7 @@ def main():
     app.add_handler(CallbackQueryHandler(menu))
     app.add_handler(ChatMemberHandler(track_channel_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(log_own_membership_change, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_task_message_media), group=-1)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_receipt_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
