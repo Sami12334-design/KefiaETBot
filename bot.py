@@ -5291,7 +5291,7 @@ def main():
     app.add_handler(CallbackQueryHandler(menu))
     app.add_handler(ChatMemberHandler(track_channel_member, ChatMemberHandler.CHAT_MEMBER))
     app.add_handler(ChatMemberHandler(log_own_membership_change, ChatMemberHandler.MY_CHAT_MEMBER))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_task_message_media), group=-1)
+    app.add_handler(MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_task_message_media), group=-2)
     app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_receipt_media))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
