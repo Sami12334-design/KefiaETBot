@@ -2472,7 +2472,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             assigned = int(claim_counts.get(task["id"], 0))
             cap = "∞" if not int(task["participant_limit"] or 0) else str(task["participant_limit"])
             state = "🟢" if task["active"] and task["completed_count"] < task["target"] else "⏸"
-            rows.append([(f"{state} #{task['id']} {task['title']} · {assigned}/{cap}", f"admintask_view_{task['id']}")])
+            tid = int(task["id"])
+            # Keep the task title as the full control panel, and expose the most-used
+            # actions directly on the Manage Daily Tasks screen as well.
+            rows.append([(f"{state} #{tid} {task['title']} · {assigned}/{cap}", f"admintask_view_{tid}")])
+            rows.append([
+                ("✏️ Edit details", f"admintask_edit_title_{tid}"),
+                ("📝 User message", f"admintask_message_edit_{tid}"),
+                ("🗑 Delete", f"admintask_delete_confirm_{tid}")
+            ])
         rows += [
             [("➕ Create new task","admin_new_task")],
             [("🏆 Overall leaderboard","admin_task_leaderboard")],
