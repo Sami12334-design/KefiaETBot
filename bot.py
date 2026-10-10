@@ -1006,6 +1006,92 @@ async def crypto_callback(update, context, action):
         )
         return
 
+    if action == "admin_sell_usdt":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            total=c.execute("SELECT COUNT(*) n FROM crypto_orders WHERE side='sell'").fetchone()["n"]
+            opened=c.execute("SELECT COUNT(*) n FROM crypto_orders WHERE side='sell' AND status IN ('awaiting_payment_proof','pending_admin_approval','payment_verified')").fetchone()["n"]
+        await q.edit_message_text(f"💸 SELL USDT MANAGEMENT\n\nOrders: {total}\nOpen orders: {opened}\nStatus: {'ENABLED' if setting_enabled('sell_enabled',True) else 'DISABLED'}",reply_markup=kb([[("📋 All orders","sell_admin_orders_all"),("⏳ Open orders","sell_admin_orders_pending")],[("🟢 Enable / 🔴 Disable","sell_admin_toggle")],[("💱 Tier rates","sell_admin_rates"),("🏦 Payout methods","sell_admin_payouts")],[("📥 USDT deposit methods / IDs","sell_admin_networks")],[("📝 Customer flow messages","sell_admin_messages")],[("⬅️ Admin Dashboard","admin")]])); return
+    if action == "sell_admin_toggle":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        val="false" if setting_enabled("sell_enabled",True) else "true"
+        with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('sell_enabled',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(val,))
+        await q.edit_message_text("Sell USDT "+("enabled." if val=="true" else "disabled for new orders."),reply_markup=kb([[("⬅️ Sell USDT Management","admin_sell_usdt")]])); return
+    if action == "sell_admin_rates":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        rows=[[(f"{label}: {setting_value('sell_usdt_rate_'+tier,'not set')} ETB/USDT",f"sell_admin_edit_sell_usdt_rate_{tier}")] for tier,label in (("1_2","1–2 USDT"),("2_5","Over 2–5 USDT"),("5_plus","Over 5 USDT"))]
+        rows.append([("⬅️ Back","admin_sell_usdt")]); await q.edit_message_text("💱 Set the ETB-per-USDT rate for each tier. Rates must be positive.",reply_markup=kb(rows)); return
+    if action == "sell_admin_payouts":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        rows=[[(f"{'🟢 ON' if setting_enabled('sell_payout_'+slug+'_enabled') else '⚪ OFF'} · {label}",f"sell_admin_toggle_sell_payout_{slug}_enabled")] for slug,label in PAYMENT_METHODS.items()]
+        rows.append([("⬅️ Back","admin_sell_usdt")]); await q.edit_message_text("🏦 Enable or disable the ETB payout methods customers may choose.",reply_markup=kb(rows)); return
+    if action == "sell_admin_networks":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        rows=[]
+        for slug,label in SELL_NETWORKS.items():
+            configured=bool(setting_value(f"sell_network_{slug}_destination","").strip())
+            rows.append([(f"{'🟢' if setting_enabled(f'sell_network_{slug}_enabled') else '⚪'} {label} · {'ID set' if configured else 'ID missing'}",f"sell_admin_network_{slug}")])
+        rows.append([("⬅️ Back","admin_sell_usdt")]); await q.edit_message_text("📥 Configure each USDT destination ID/address and its enabled status.",reply_markup=kb(rows)); return
+    if action.startswith("sell_admin_network_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        slug=action.removeprefix("sell_admin_network_")
+        if slug not in SELL_NETWORKS: await q.edit_message_text("Unknown method."); return
+        dest=setting_value(f"sell_network_{slug}_destination","") or ""
+        await q.edit_message_text(f"{SELL_NETWORKS[slug]}\nStatus: {'Enabled' if setting_enabled(f'sell_network_{slug}_enabled') else 'Disabled'}\nDestination: {dest or 'Not set'}",reply_markup=kb([[("✏️ Change destination","sell_admin_edit_sell_network_"+slug+"_destination")],[("🟢 Enable / 🔴 Disable","sell_admin_toggle_sell_network_"+slug+"_enabled")],[("⬅️ Back","sell_admin_networks")]])); return
+    if action == "sell_admin_messages":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        items=[("Unavailable notice","sell_unavailable_message"),("Payout method question","sell_payout_prompt"),("Account number prompt","sell_account_number_prompt"),("Account holder prompt","sell_account_name_prompt"),("Deposit method / rates step","sell_deposit_prompt"),("USDT amount prompt","sell_amount_prompt"),("Destination + transfer proof instructions","sell_receipt_prompt"),("Proof received confirmation","sell_confirmation_message")]
+        rows=[[(f"{label} · {len(setting_value(key,'') or '')} chars",f"sell_admin_edit_{key}")] for label,key in items]; rows.append([("⬅️ Back","admin_sell_usdt")])
+        await q.edit_message_text("📝 Edit customer-visible Sell USDT text. Placeholders: {method}, {account_number}, {account_name}, {payout_summary}, {rates}, {network}, {destination}, {amount}, {rate}, {total}, {order_id}.",reply_markup=kb(rows)); return
+    if action.startswith("sell_admin_toggle_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        key=action.removeprefix("sell_admin_toggle_")
+        if not key.endswith("_enabled") or not key.startswith(("sell_payout_","sell_network_")): await q.edit_message_text("Unknown setting."); return
+        val="false" if setting_enabled(key) else "true"
+        with db() as c: c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(key,val))
+        await q.edit_message_text(f"✅ {key} {'enabled' if val=='true' else 'disabled'}.",reply_markup=kb([[("🏦 Payout methods","sell_admin_payouts")],[("📥 Deposit methods","sell_admin_networks")],[("⬅️ Back","admin_sell_usdt")]])); return
+    if action.startswith("sell_admin_edit_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        key=action.removeprefix("sell_admin_edit_"); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
+        if key.startswith("sell_network_") and key.endswith("_destination"): allowed.add(key)
+        if key not in allowed: await q.edit_message_text("Setting not editable here."); return
+        set_pending(uid,"sell_admin_setting",{"key":key}); await q.edit_message_text(f"✏️ Edit {key}\nCurrent value:\n{setting_value(key,'(not set)')}\n\nSend the new value. Send 'off' to clear optional text. Rates must be positive numbers.",reply_markup=kb([[("❌ Cancel","admin_sell_usdt")]])); return
+    if action in ("sell_admin_orders_all","sell_admin_orders_pending"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        where="AND status IN ('awaiting_payment_proof','pending_admin_approval','payment_verified')" if action.endswith("pending") else ""
+        with db() as c: orders=c.execute(f"SELECT id,user_id,amount_usdt,total_etb,status FROM crypto_orders WHERE side='sell' {where} ORDER BY id DESC LIMIT 30").fetchall()
+        rows=[[(f"#{o['id']} · {o['amount_usdt']:g} USDT · {o['total_etb']:g} ETB · {o['status']}",f"sell_admin_order_{o['id']}")] for o in orders]; rows.append([("⬅️ Back","admin_sell_usdt")])
+        await q.edit_message_text("💸 SELL USDT ORDERS — select one to inspect or reply.",reply_markup=kb(rows)); return
+    if action.startswith("sell_admin_order_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        try: oid=int(action.rsplit("_",1)[1])
+        except ValueError: await q.edit_message_text("Invalid order."); return
+        with db() as c: order=c.execute("SELECT * FROM crypto_orders WHERE id=? AND side='sell'",(oid,)).fetchone()
+        if not order: await q.edit_message_text("Order not found."); return
+        body=f"💸 SELL USDT ORDER #{oid}\nUser: {order['user_id']}\nAmount: {order['amount_usdt']:g} USDT\nRate: {order['rate_etb']:g} ETB/USDT\nPayout: {order['total_etb']:g} ETB\nPayout method: {PAYMENT_METHODS.get(order['payout_method'],order['payout_method'] or '—')}\nPayout number: {order['payout_account_number'] or '—'}\nHolder: {order['payout_account_name'] or '—'}\nUSDT method: {SELL_NETWORKS.get(order['transfer_method'],order['transfer_method'] or '—')}\nDestination: {order['transfer_destination'] or '—'}\nStatus: {order['status']}"
+        rows=[[("💬 Reply (text/photo/document)",f"sell_admin_reply_{oid}")]]
+        if order["status"]=="pending_admin_approval": rows.append([("✅ Verify transfer",f"sellorder_verify_{oid}"),("❌ Reject",f"sellorder_reject_{oid}")])
+        rows.extend([[("⬅️ All orders","sell_admin_orders_all")],[("⬅️ Sell USDT Management","admin_sell_usdt")]])
+        await q.edit_message_text(body,reply_markup=kb(rows))
+        if order["receipt"]:
+            try:
+                kind,fid=order["receipt"].split(":",1)
+                if kind=="photo": await context.bot.send_photo(uid,fid,caption=f"Transfer proof for order #{oid}")
+                elif kind=="document": await context.bot.send_document(uid,fid,caption=f"Transfer proof for order #{oid}")
+            except Exception: log.warning("Could not display sell order proof %s",oid)
+        return
+    if action.startswith("sell_admin_reply_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        oid=int(action.rsplit("_",1)[1])
+        with db() as c: order=c.execute("SELECT user_id FROM crypto_orders WHERE id=? AND side='sell'",(oid,)).fetchone()
+        if not order: await q.edit_message_text("Order not found."); return
+        set_pending(uid,"sell_admin_chat",{"order_id":oid,"target_user_id":order["user_id"]}); await q.edit_message_text(f"Send your text, photo, or document reply for Sell USDT order #{oid}."); return
+    if action.startswith("sell_user_chat_"):
+        try: oid=int(action.rsplit("_",1)[1])
+        except ValueError: await q.edit_message_text("Invalid order."); return
+        with db() as c: order=c.execute("SELECT id FROM crypto_orders WHERE id=? AND user_id=? AND side='sell'",(oid,uid)).fetchone()
+        if not order: await q.edit_message_text("Order not found."); return
+        set_pending(uid,"sell_user_chat",{"order_id":oid}); await q.edit_message_text(f"💬 Chat with admin about Sell USDT order #{oid}. Send text, photo, or document.",reply_markup=kb([[("❌ Cancel","home")]])); return
     if action.startswith("sell_payout_"):
         slug = action[len("sell_payout_"):]
         if slug not in PAYMENT_METHODS or not setting_enabled(f"sell_payout_{slug}_enabled"):
@@ -1902,9 +1988,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ):
         await digital_callback(update, context, action)
         return
-    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders", "buy_usdt_continue_destination") or action.startswith((
-        "buy_usdt_gateway_", "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_",
-        "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_"
+    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders", "buy_usdt_continue_destination", "admin_sell_usdt", "sell_admin_toggle", "sell_admin_rates", "sell_admin_payouts", "sell_admin_networks", "sell_admin_messages", "sell_admin_orders_all", "sell_admin_orders_pending") or action.startswith((
+        "buy_usdt_gateway_", "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_", "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_", "sell_admin_network_", "sell_admin_toggle_", "sell_admin_edit_", "sell_admin_order_", "sell_admin_reply_", "sell_user_chat_"
     )):
         await crypto_callback(update, context, action)
         return
@@ -2959,6 +3044,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📊 Statistics","admin_stats"),("🏆 Task leaderboard","admin_task_leaderboard")],
             [("🛍 Social account listings","admin_marketplace")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
+            [("💸 Manage Sell USDT","admin_sell_usdt")],
             [("⚙️ Set prices / limits","admin_settings")],
             [("🌟 Gemini Pro & Products","admin_digital_products")],
             [("🛍 Advertiser Management","advertiser_admin")],
