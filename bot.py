@@ -4108,6 +4108,49 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         await message.reply_text(f"✅ Payout proof delivered to user for withdrawal #{withdrawal_id}.")
         return
 
+    if pending and pending["action"] in ("sell_user_chat", "sell_admin_chat"):
+        state = decode_pending(pending["data"])
+        action = pending["action"]
+        order_id = int(state.get("order_id", 0))
+        if action == "sell_user_chat":
+            with db() as c:
+                order = c.execute("SELECT id FROM crypto_orders WHERE id=? AND user_id=? AND side='sell'", (order_id, user.id)).fetchone()
+            if not order:
+                await message.reply_text("Sell USDT order not found."); return
+            note = f"💬 SELL USDT USER MESSAGE · order #{order_id}\nUser ID: {user.id}\n{message.caption or ''}"
+            delivered = False
+            for aid in ADMIN_IDS:
+                try:
+                    if message.photo:
+                        await context.bot.send_photo(aid, message.photo[-1].file_id, caption=note[:1024])
+                    elif message.document:
+                        await context.bot.send_document(aid, message.document.file_id, caption=note[:1024])
+                    else:
+                        continue
+                    await context.bot.send_message(aid, "Reply to user:", reply_markup=kb([[("💬 Reply to user", f"sell_admin_reply_{order_id}")], [("📋 Open order", f"sell_admin_order_{order_id}")]]))
+                    delivered = True
+                except Exception:
+                    log.exception("Could not forward Sell USDT media to admin")
+            if not delivered:
+                await message.reply_text("Could not send the file to admin."); return
+            with db() as c:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ File sent to admin. Replies will arrive here."); return
+        if action == "sell_admin_chat":
+            target = int(state.get("target_user_id", 0))
+            try:
+                if message.photo:
+                    await context.bot.send_photo(target, message.photo[-1].file_id, caption=f"📩 Admin · Sell USDT order #{order_id}\n{message.caption or ''}"[:1024])
+                elif message.document:
+                    await context.bot.send_document(target, message.document.file_id, caption=f"📩 Admin · Sell USDT order #{order_id}\n{message.caption or ''}"[:1024])
+                else:
+                    await message.reply_text("Send a photo or document."); return
+            except Exception:
+                await message.reply_text("Could not deliver the file to the user."); return
+            with db() as c:
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ Reply delivered to user."); return
+
     if pending and pending["action"] == "crypto_delivery":
         await deliver_crypto_media(update, context, pending)
         return
