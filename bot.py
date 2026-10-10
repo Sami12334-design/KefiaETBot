@@ -2736,6 +2736,18 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         set_pending(uid, "admin_task_message_template", {"task_id":tid})
         await q.edit_message_text(prompt, reply_markup=kb([[("Cancel","admintask_message_cancel_" + str(tid))]]))
+    elif action.startswith("admintask_message_done_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            tid = int(action.rsplit("_", 1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid task ID."); return
+        with db() as c:
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+        await q.edit_message_text("✅ Task message editing finished. Saved text and media changes are kept.",
+                                  reply_markup=kb([[("📋 Review task",f"admintask_view_{tid}")],
+                                                   [("📋 Manage tasks","admin_tasks")]]))
     elif action.startswith("admintask_message_cancel_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -4163,8 +4175,8 @@ async def handle_task_message_media(update: Update, context: ContextTypes.DEFAUL
                   (f"task_message_media_{tid}", json.dumps(media_info, ensure_ascii=False)))
     await message.reply_text(
         f"✅ Media attached to task #{tid} — {task['title']}. Users will see it when they open the task. "
-        "Send another supported file to replace it, send text to update the message template, or press Cancel.",
-        reply_markup=kb([[("📋 Review task", f"admintask_view_{tid}")],
+        "Send another supported file to replace it, send text to update the message template, or press Done to finish.",
+        reply_markup=kb([[("✅ Done", f"admintask_message_done_{tid}")],
                          [("Cancel", f"admintask_message_cancel_{tid}")]])
     )
 
