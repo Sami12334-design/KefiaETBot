@@ -3729,6 +3729,69 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
     message = update.effective_message
     if not user or not message:
         return
+    # Advertiser submissions and replies accept photos, videos, animations, and documents.
+    with db() as c:
+        current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+    if current_pending and current_pending["action"] in {"advertiser_content","advertiser_user_message","admin_ad_message"}:
+        pending_action=current_pending["action"]; state=decode_pending(current_pending["data"])
+        request_id=int(state.get("request_id",0) or 0); target=int(state.get("target_user_id",0) or 0)
+        caption=(message.caption or "").strip(); media_type=None; file_id=None
+        if message.photo: media_type="photo"; file_id=message.photo[-1].file_id
+        elif message.video: media_type="video"; file_id=message.video.file_id
+        elif message.document: media_type="document"; file_id=message.document.file_id
+        elif message.animation: media_type="animation"; file_id=message.animation.file_id
+        else:
+            await message.reply_text("Please send a photo, video, PDF, APK or another document."); return
+        if pending_action=="advertiser_content":
+            if not setting_enabled("advertiser_active",True):
+                with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+                await message.reply_text(str(setting_value("advertiser_unavailable_message","Advertiser service is temporarily unavailable."))); return
+            details={"product_type":state.get("product_type","Other"),"duration":state.get("duration",""),"price":state.get("price"),"content_type":media_type,"content_text":caption,"file_id":file_id}
+            with db() as c:
+                cur=c.execute("INSERT INTO ad_requests(user_id,kind,details,duration,quoted_price,status,created_at) VALUES(?,?,?,?,?,'pending',?)",(user.id,details["product_type"],json.dumps(details,ensure_ascii=False),details["duration"],float(details.get("price") or 0),now()))
+                request_id=cur.lastrowid
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+            await message.reply_text(f"✅ Advertiser request #{request_id} submitted. An admin will review the content and reply here.",reply_markup=kb([[( "💬 Message admin",f"advertiser_chat_{request_id}")],[( "📋 My ad requests","my_ads")]]))
+            admin_caption=f"📣 ADVERTISER REQUEST #{request_id}\nUser: {user.id} (@{user.username or 'no_username'})\nType: {details['product_type']}\nDuration: {details['duration']}\nPrice: {details['price']} ETB\nCaption: {caption[:500] or '(none)'}"
+            for aid in ADMIN_IDS:
+                try:
+                    markup=kb([[( "🔎 Review advertiser request",f"advertiser_request_{request_id}")]])
+                    if media_type=="photo": await context.bot.send_photo(aid,file_id,caption=admin_caption[:1024],reply_markup=markup)
+                    elif media_type=="video": await context.bot.send_video(aid,file_id,caption=admin_caption[:1024],reply_markup=markup)
+                    elif media_type=="document": await context.bot.send_document(aid,file_id,caption=admin_caption[:1024],reply_markup=markup)
+                    else: await context.bot.send_animation(aid,file_id,caption=admin_caption[:1024],reply_markup=markup)
+                except Exception: log.warning("Could not forward advertiser request %s",request_id)
+            return
+        if pending_action=="advertiser_user_message":
+            with db() as c: owned=c.execute("SELECT id FROM ad_requests WHERE id=? AND user_id=?",(request_id,user.id)).fetchone()
+            if not owned: await message.reply_text("That advertiser request was not found."); return
+            for aid in ADMIN_IDS:
+                try:
+                    note=f"💬 ADVERTISER MESSAGE · request #{request_id}\nFrom user {user.id}\n{caption[:500]}"
+                    if media_type=="photo": await context.bot.send_photo(aid,file_id,caption=note[:1024])
+                    elif media_type=="video": await context.bot.send_video(aid,file_id,caption=note[:1024])
+                    elif media_type=="document": await context.bot.send_document(aid,file_id,caption=note[:1024])
+                    else: await context.bot.send_animation(aid,file_id,caption=note[:1024])
+                except Exception: log.warning("Could not forward advertiser message")
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+            await message.reply_text("✅ Message sent to the admin.")
+            return
+        if pending_action=="admin_ad_message":
+            if not is_admin(user.id): await message.reply_text("⛔ Admin access only."); return
+            if not target: await message.reply_text("Advertiser recipient not found."); return
+            prefix=f"📩 Admin reply about advertiser request #{request_id}\n"
+            try:
+                if media_type=="photo": await context.bot.send_photo(target,file_id,caption=(prefix+caption)[:1024])
+                elif media_type=="video": await context.bot.send_video(target,file_id,caption=(prefix+caption)[:1024])
+                elif media_type=="document": await context.bot.send_document(target,file_id,caption=(prefix+caption)[:1024])
+                else: await context.bot.send_animation(target,file_id,caption=(prefix+caption)[:1024])
+                with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+                await message.reply_text("✅ Reply delivered to advertiser.",reply_markup=kb([[( "🔎 View request",f"advertiser_request_{request_id}")],[( "📥 Advertiser requests","advertiser_admin_requests")]]))
+            except Exception:
+                log.exception("Could not deliver advertiser media reply")
+                await message.reply_text("Could not deliver the media to the advertiser.")
+            return
+
     # Admin can send a text/photo/document response to a promoter submission.
     with db() as c:
         current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
@@ -4315,6 +4378,67 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p:
         await message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
+    if action == "advertiser_admin_setting":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state=decode_pending(data); field=state.get("field"); key=state.get("key")
+        allowed={"rules":"advertiser_rules","channels":"advertiser_channels","payment":"advertiser_payment_info","unavailable":"advertiser_unavailable_message","price_day":"advertiser_price_day","price_week":"advertiser_price_week","price_month":"advertiser_price_month"}
+        if field not in allowed or key!=allowed[field]:
+            await message.reply_text("This advertiser setting session expired."); return
+        saved=value
+        if field.startswith("price_"):
+            try:
+                amount=float(value.replace(",",""))
+                if amount<0 or not math.isfinite(amount): raise ValueError()
+                saved="" if amount==0 else f"{amount:g}"
+            except ValueError:
+                await message.reply_text("Enter a valid non-negative ETB amount. Use 0 to hide this duration."); return
+        if len(saved)>3500:
+            await message.reply_text("Keep the setting under 3,500 characters."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(key,saved))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+        await message.reply_text("✅ Advertiser setting saved.",reply_markup=kb([[( "🛠 Advertiser management","advertiser_admin")],[( "⬅️ Admin Dashboard","admin")]]))
+        return
+    if action == "advertiser_content":
+        state=decode_pending(data)
+        if not setting_enabled("advertiser_active",True):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+            await message.reply_text(str(setting_value("advertiser_unavailable_message","Advertiser service is temporarily unavailable."))); return
+        if not value or len(value)>3500:
+            await message.reply_text("Send ad text between 1 and 3,500 characters, or upload a photo/video/document."); return
+        details={"product_type":state.get("product_type","Other"),"duration":state.get("duration",""),"price":state.get("price"),"content_type":"text","content_text":value}
+        with db() as c:
+            cur=c.execute("INSERT INTO ad_requests(user_id,kind,details,duration,quoted_price,status,created_at) VALUES(?,?,?,?,?,'pending',?)",(user.id,details["product_type"],json.dumps(details,ensure_ascii=False),details["duration"],float(details.get("price") or 0),now()))
+            request_id=cur.lastrowid
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+        await message.reply_text(f"✅ Advertiser request #{request_id} submitted. An admin will review it and reply here.",reply_markup=kb([[( "💬 Message admin",f"advertiser_chat_{request_id}")],[( "📋 My ad requests","my_ads")]]))
+        await notify_admins(context,f"📣 ADVERTISER REQUEST #{request_id}\nUser: {user.id} (@{user.username or 'no_username'})\nType: {details['product_type']}\nDuration: {details['duration']}\nPrice: {details['price']} ETB\nContent: {value[:1800]}\nReview in Admin Dashboard → Advertiser Management.")
+        return
+    if action == "advertiser_user_message":
+        state=decode_pending(data); request_id=int(state.get("request_id",0) or 0)
+        with db() as c: owned=c.execute("SELECT id FROM ad_requests WHERE id=? AND user_id=?",(request_id,user.id)).fetchone()
+        if not owned:
+            await message.reply_text("That advertiser request was not found."); return
+        await notify_admins(context,f"💬 ADVERTISER MESSAGE · request #{request_id}\nFrom user {user.id}\n{value[:2500]}")
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+        await message.reply_text("✅ Message sent to the admin. You can continue from My ad requests.")
+        return
+    if action == "admin_ad_message":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        state=decode_pending(data); target=int(state.get("target_user_id",0) or 0); request_id=int(state.get("request_id",0) or 0)
+        if not target:
+            await message.reply_text("Advertiser recipient not found."); return
+        try:
+            await context.bot.send_message(target,f"📩 Admin reply about advertiser request #{request_id}:\n\n{value}")
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+            await message.reply_text("✅ Reply sent to advertiser.",reply_markup=kb([[( "🔎 View request",f"advertiser_request_{request_id}")],[( "📥 Advertiser requests","advertiser_admin_requests")]]))
+        except Exception:
+            log.exception("Could not send advertiser reply")
+            await message.reply_text("Could not deliver the message. The advertiser may have blocked the bot.")
+        return
     if action == "admin_invite_unavailable_text":
         if not is_admin(user.id):
             with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
