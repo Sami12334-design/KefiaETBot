@@ -1943,8 +1943,58 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 break
         if not rows:
             await q.edit_message_text("🧩 No tasks are open right now. Check back soon for new opportunities.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
+        rows.append([("🏆 Task leaderboard", "public_task_leaderboard")])
         rows.append([("⬅️ Dashboard", "home")])
-        await q.edit_message_text("🧩 DAILY TASKS\n\nChoose a task to see its reward, progress and your personal invite link.", reply_markup=kb(rows))
+        await q.edit_message_text("🧩 DAILY TASKS\n\nChoose a task to see its reward, progress and your personal invite link.\n\n🏆 The leaderboard ranks participants by verified joins.", reply_markup=kb(rows))
+    elif action == "public_task_leaderboard":
+        with db() as c:
+            leaders = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,COUNT(e.id) AS joins_count,"
+                "COUNT(DISTINCT tc.task_id) AS tasks_joined "
+                "FROM task_claims tc JOIN users u ON u.user_id=tc.user_id "
+                "LEFT JOIN invite_links l ON l.task_id=tc.task_id AND l.owner_user_id=tc.user_id "
+                "LEFT JOIN invite_events e ON e.invite_link=l.invite_link "
+                "GROUP BY u.user_id,u.username,u.first_name "
+                "ORDER BY joins_count DESC,tasks_joined DESC,u.user_id ASC LIMIT 20"
+            ).fetchall()
+        lines = ["🏆 DAILY TASK LEADERBOARD", "Top participants · ranked by verified joins", ""]
+        if leaders:
+            for rank, person in enumerate(leaders, 1):
+                name = ("@" + person["username"]) if person["username"] else (person["first_name"] or f"User {person['user_id']}")
+                lines.append(f"{rank}. {name[:26]} — {int(person['joins_count'] or 0)} joins · {int(person['tasks_joined'] or 0)} tasks")
+        else:
+            lines.append("No participants have joined a task yet. Be the first!")
+        await q.edit_message_text("\n".join(lines)[:3900], reply_markup=kb([
+            [("🧩 Daily Tasks", "jobs"), ("🏠 Dashboard", "home")]
+        ]))
+    elif action.startswith("public_task_leaderboard_"):
+        try:
+            tid = int(action.rsplit("_", 1)[1])
+        except (TypeError, ValueError):
+            await q.edit_message_text("Invalid task.", reply_markup=kb([[("🧩 Daily Tasks", "jobs")]])); return
+        with db() as c:
+            task = c.execute("SELECT id,title FROM tasks WHERE id=?", (tid,)).fetchone()
+            leaders = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,COUNT(e.id) AS joins_count,tc.status "
+                "FROM task_claims tc JOIN users u ON u.user_id=tc.user_id "
+                "LEFT JOIN invite_links l ON l.task_id=tc.task_id AND l.owner_user_id=tc.user_id "
+                "LEFT JOIN invite_events e ON e.invite_link=l.invite_link "
+                "WHERE tc.task_id=? GROUP BY u.user_id,u.username,u.first_name,tc.status "
+                "ORDER BY joins_count DESC,u.user_id ASC LIMIT 20", (tid,)
+            ).fetchall()
+        if not task:
+            await q.edit_message_text("Task not found.", reply_markup=kb([[("🧩 Daily Tasks", "jobs")]])); return
+        lines = [f"🏆 TASK LEADERBOARD · {task['title']}", "Participants ranked by verified joins", ""]
+        if leaders:
+            for rank, person in enumerate(leaders, 1):
+                name = ("@" + person["username"]) if person["username"] else (person["first_name"] or f"User {person['user_id']}")
+                lines.append(f"{rank}. {name[:26]} — {int(person['joins_count'] or 0)} joins · {person['status']}")
+        else:
+            lines.append("No participants have claimed this task yet.")
+        await q.edit_message_text("\n".join(lines)[:3900], reply_markup=kb([
+            [("🔄 Refresh", f"public_task_leaderboard_{tid}")],
+            [("🧩 Daily Tasks", "jobs"), ("🏠 Dashboard", "home")]
+        ]))
     elif action.startswith("task_"):
         try:
             tid = int(action.split("_",1)[1])
@@ -1999,7 +2049,11 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for token, replacement in replacements.items():
             template = template.replace(token, replacement)
         msg = template
-        await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress",f"task_{tid}")],[("🧩 More tasks","jobs"),("🏠 Dashboard","home")]]))
+        await q.edit_message_text(msg, reply_markup=kb([
+            [("🔄 Refresh progress",f"task_{tid}")],
+            [("🏆 Task leaderboard",f"public_task_leaderboard_{tid}")],
+            [("🧩 More tasks","jobs"),("🏠 Dashboard","home")]
+        ]))
     elif action == "invite":
         if str(setting_value("invite_earn_active", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
             await q.edit_message_text("🔗 Invite & Earn is temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Dashboard","home")]]))
