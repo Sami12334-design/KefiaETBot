@@ -1035,7 +1035,7 @@ async def crypto_callback(update, context, action):
         dest=setting_value(f"sell_network_{slug}_destination","") or ""
         button_label=setting_value(f"sell_network_{slug}_label",SELL_NETWORKS[slug]) or SELL_NETWORKS[slug]
         await q.edit_message_text(
-            f"{SELL_NETWORKS[slug]}\\nCustomer button: {button_label}\\nStatus: {'Enabled' if setting_enabled(f'sell_network_{slug}_enabled') else 'Disabled'}\\nDestination details:\\n{dest or 'Not set'}",
+            f"{SELL_NETWORKS[slug]}\nCustomer button: {button_label}\nStatus: {'Enabled' if setting_enabled(f'sell_network_{slug}_enabled') else 'Disabled'}\nDestination details:\n{dest or 'Not set'}",
             reply_markup=kb([
                 [("✏️ Edit customer button title","sell_admin_edit_sell_network_"+slug+"_label")],
                 [("✏️ Edit destination details","sell_admin_edit_sell_network_"+slug+"_destination")],
@@ -1057,7 +1057,7 @@ async def crypto_callback(update, context, action):
         await q.edit_message_text(f"✅ {key} {'enabled' if val=='true' else 'disabled'}.",reply_markup=kb([[("🏦 Payout methods","sell_admin_payouts")],[("📥 Deposit methods","sell_admin_networks")],[("⬅️ Back","admin_sell_usdt")]])); return
     if action.startswith("sell_admin_edit_"):
         if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
-        key=action.removeprefix("sell_admin_edit_"); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
+        key=action.removeprefix("sell_admin_edit_"); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_network_details_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
         if key.startswith("sell_network_") and key.endswith(("_destination", "_label")): allowed.add(key)
         if key not in allowed: await q.edit_message_text("Setting not editable here."); return
         set_pending(uid,"sell_admin_setting",{"key":key}); await q.edit_message_text(f"✏️ Edit {key}\nCurrent value:\n{setting_value(key,'(not set)')}\n\nSend the new value. Send 'off' to clear optional text. Rates must be positive numbers.",reply_markup=kb([[("❌ Cancel","admin_sell_usdt")]])); return
@@ -1129,7 +1129,7 @@ async def crypto_callback(update, context, action):
             await q.edit_message_text("Your session expired. Please restart Sell USDT.", reply_markup=kb([[("⬅️ Marketplace","market")]]))
             return
         set_pending(uid, "sell_amount", payout)
-        amount_prompt = setting_value("sell_amount_prompt", "💸 Enter the amount of USDT you will send.\\nDeposit method: {network}\\nCurrent sell rates:\\n{rates}\\n\\nMinimum 1 USDT.")
+        amount_prompt = setting_value("sell_amount_prompt", "💸 Enter the amount of USDT you will send.\nDeposit method: {network}\nCurrent sell rates:\n{rates}\n\nMinimum 1 USDT.")
         amount_prompt = render_digital_template(amount_prompt, {"network":setting_value(f"sell_network_{slug}_label", SELL_NETWORKS[slug]),"rates":rates_text("sell")})
         await q.edit_message_text(amount_prompt, reply_markup=kb([[("❌ Cancel | አቋርጥ","home")]]))
         return
@@ -1154,7 +1154,7 @@ async def crypto_callback(update, context, action):
         network_label = setting_value(f"sell_network_{slug}_label", SELL_NETWORKS[slug]).strip() or SELL_NETWORKS[slug]
         detail_template = setting_value(
             "sell_network_details_prompt",
-            "💸 USDT deposit details\\n\\nMethod: {network}\\n\\n{destination}\\n\\nAfter completing the payment, send a clear screenshot of the transfer. Keep this information for your records."
+            "💸 USDT deposit details\n\nMethod: {network}\n\n{destination}\n\nAfter completing the payment, send a clear screenshot of the transfer. Keep this information for your records."
         )
         detail_text = render_digital_template(detail_template, {
             "network":network_label, "destination":destination,
@@ -1426,7 +1426,7 @@ async def handle_crypto_text(update, context, action, data, value):
 
     if action == "sell_admin_setting":
         if not is_admin(uid): await message.reply_text("⛔ Admin access only."); return True
-        key=str(state.get("key","")); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
+        key=str(state.get("key","")); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_network_details_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
         if key.startswith("sell_network_") and key.endswith(("_destination", "_label")): allowed.add(key)
         if key not in allowed: await message.reply_text("Invalid setting."); return True
         saved="" if value.lower() in {"off","none"} else value
