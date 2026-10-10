@@ -1180,17 +1180,68 @@ async def crypto_callback(update, context, action):
             await q.edit_message_text("⛔ Admin access only.")
             return
         with db() as c:
+            buy_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE side='buy'").fetchone()[0]
+            sell_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE side='sell'").fetchone()[0]
+            pending_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE status='pending_admin_approval'").fetchone()[0]
+            approved_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE status IN ('payment_verified','completed')").fetchone()[0]
+        await q.edit_message_text(
+            f"🪙 CRYPTO ORDERS\\n\\n🛒 Buy orders: {buy_count}\\n💸 Sell orders: {sell_count}\\n"
+            f"⏳ Awaiting approval: {pending_count}\\n✅ Approved / completed: {approved_count}\\n\\nChoose a section:",
+            reply_markup=kb([[("🛒 Buy orders","crypto_orders_buy"),("💸 Sell orders","crypto_orders_sell")],
+                             [("✅ Approved orders","crypto_orders_approved")],
+                             [("⬅️ Admin Dashboard","admin")]]))
+        return
+
+    if action in ("crypto_orders_buy", "crypto_orders_sell", "crypto_orders_approved",
+                  "crypto_orders_buy_pending", "crypto_orders_sell_pending", "crypto_orders_pending"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        if action == "crypto_orders_approved":
+            where, params, title = "status IN ('payment_verified','completed')", (), "✅ APPROVED / COMPLETED ORDERS"
+        elif action == "crypto_orders_pending":
+            where, params, title = "status='pending_admin_approval'", (), "⏳ ORDERS AWAITING APPROVAL"
+        else:
+            side = "buy" if "buy" in action else "sell"
+            if action.endswith("_pending"):
+                where, params, title = "side=? AND status='pending_admin_approval'", (side,), f"⏳ {side.upper()} ORDERS AWAITING APPROVAL"
+            else:
+                where, params, title = "side=?", (side,), ("🛒 BUY USDT ORDERS" if side == "buy" else "💸 SELL USDT ORDERS")
+        with db() as c:
             orders = c.execute(
-                "SELECT id,user_id,side,amount_usdt,total_etb,status FROM crypto_orders "
-                "WHERE status='pending_admin_approval' ORDER BY id LIMIT 10"
+                f"SELECT id,user_id,side,amount_usdt,total_etb,status FROM crypto_orders WHERE {where} ORDER BY id DESC LIMIT 30",
+                params,
             ).fetchall()
-        rows = []
-        for order in orders:
-            rows.append([
-                (f"#{order['id']} {order['side'].upper()} {order['amount_usdt']:g} USDT · {order['total_etb']:g} ETB", f"crypto_order_view_{order['id']}")
-            ])
-        rows.append([("⬅️ Admin Dashboard", "admin")])
-        await q.edit_message_text("🪙 Crypto orders awaiting payment verification:", reply_markup=kb(rows))
+        rows = [[(f"#{o['id']} · {o['side'].upper()} · {o['amount_usdt']:g} USDT · {o['total_etb']:g} ETB · {o['status'].replace('_',' ')}",
+                  f"crypto_order_view_{o['id']}")] for o in orders]
+        if action == "crypto_orders_buy":
+            rows.append([("⏳ Pending buy orders","crypto_orders_buy_pending")])
+        elif action == "crypto_orders_sell":
+            rows.append([("⏳ Pending sell orders","crypto_orders_sell_pending")])
+        elif action == "crypto_orders_approved":
+            rows.append([("⏳ All pending orders","crypto_orders_pending")])
+        rows.extend([[("⬅️ Crypto orders","admin_crypto_orders")]])
+        await q.edit_message_text(f"{title}\\n\\nSelect an order to inspect, view the original receipt, or message the user.", reply_markup=kb(rows))
+        return
+
+    if action.startswith("crypto_admin_reply_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only.")
+            return
+        try:
+            order_id = int(action.rsplit("_", 1)[-1])
+        except ValueError:
+            await q.edit_message_text("Invalid order.")
+            return
+        with db() as c:
+            order = c.execute("SELECT id,user_id,side FROM crypto_orders WHERE id=?", (order_id,)).fetchone()
+        if not order:
+            await q.edit_message_text("Order not found.")
+            return
+        set_pending(uid, "crypto_admin_reply", {"order_id": order_id, "target_user_id": order["user_id"]})
+        await q.edit_message_text(
+            f"💬 Reply to {order['side'].upper()} order #{order_id}.\\n\\nSend text, a photo/document with an optional caption, or a photo/document alone. Order status will not change.",
+            reply_markup=kb([[("❌ Cancel", f"crypto_order_view_{order_id}")]]))
         return
 
     if action.startswith("crypto_order_view_"):
@@ -1211,13 +1262,22 @@ async def crypto_callback(update, context, action):
             f"ETB total: {order['total_etb']:g}\nMethod: {method}\nDestination/details: {details}\n"
             f"Receiving destination: {order['transfer_destination'] or '—'}\nStatus: {order['status']}"
         )
-        rows = []
+        rows = [[("💬 Message user (text/photo + caption)", f"crypto_admin_reply_{order['id']}")]]
         if order["status"] == "pending_admin_approval":
             prefix = "buyorder" if order["side"] == "buy" else "sellorder"
-            rows.append([("✅ Verify payment & continue", f"{prefix}_verify_{order['id']}"),
+            rows.append([("✅ Approve / verify payment", f"{prefix}_verify_{order['id']}"),
                          ("❌ Reject order", f"{prefix}_reject_{order['id']}")])
         rows.append([("⬅️ Crypto orders", "admin_crypto_orders")])
         await q.edit_message_text(msg, reply_markup=kb(rows))
+        if order["receipt"]:
+            try:
+                kind, fid = order["receipt"].split(":", 1)
+                if kind == "photo":
+                    await context.bot.send_photo(uid, fid, caption=f"📎 Original customer receipt for order #{order['id']}")
+                elif kind == "document":
+                    await context.bot.send_document(uid, fid, caption=f"📎 Original customer receipt for order #{order['id']}")
+            except Exception:
+                log.warning("Could not display original crypto order receipt %s", order["id"])
         return
 
     if action.startswith(("buyorder_verify_", "sellorder_verify_")):
@@ -2072,9 +2132,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ):
         await digital_callback(update, context, action)
         return
-    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders", "buy_usdt_continue_destination", "admin_sell_usdt", "sell_admin_toggle", "sell_admin_rates", "sell_admin_payouts", "sell_admin_networks", "sell_admin_messages", "sell_admin_orders_all", "sell_admin_orders_pending") or action.startswith((
-        "buy_usdt_gateway_", "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_", "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_", "sell_admin_network_", "sell_admin_toggle_", "sell_admin_edit_", "sell_admin_order_", "sell_admin_reply_", "sell_user_chat_"
-    )):
+    if action in ("buy_usdt", "buy_asset", "sell_usdt", "sell_saved", "admin_crypto_orders", "buy_usdt_continue_destination", "admin_sell_usdt", "sell_admin_toggle", "sell_admin_rates", "sell_admin_payouts", "sell_admin_networks", "sell_admin_messages", "sell_admin_orders_all", "sell_admin_orders_pending", "crypto_orders_buy", "crypto_orders_sell", "crypto_orders_approved", "crypto_orders_pending") or action.startswith((
+        "buy_usdt_gateway_", "buy_method_", "sell_payout_", "sell_network_", "crypto_order_view_", "buyorder_verify_", "sellorder_verify_", "buyorder_reject_", "sellorder_reject_", "sell_admin_network_", "sell_admin_toggle_", "sell_admin_edit_", "sell_admin_order_", "sell_admin_reply_", "sell_user_chat_", "crypto_admin_reply_"
+    )) or action.startswith(("crypto_orders_buy_pending", "crypto_orders_sell_pending")):
         await crypto_callback(update, context, action)
         return
     if action == "home":
@@ -4428,6 +4488,38 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             c.execute("UPDATE withdrawals SET status='approved' WHERE id=? AND status='pending'", (withdrawal_id,))
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
         await message.reply_text(f"✅ Payout proof delivered to user for withdrawal #{withdrawal_id}.")
+        return
+
+    if pending and pending["action"] == "crypto_admin_reply":
+        state = decode_pending(pending["data"])
+        order_id = int(state.get("order_id", 0))
+        target_uid = int(state.get("target_user_id", 0))
+        with db() as c:
+            order = c.execute("SELECT id,side FROM crypto_orders WHERE id=? AND user_id=?", (order_id, target_uid)).fetchone()
+        if not is_admin(user.id) or not order:
+            await message.reply_text("Order not found or admin access required.")
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            return
+        prefix = f"📩 Message from ETpay admin · {order['side'].upper()} order #{order_id}"
+        try:
+            if message.photo:
+                await context.bot.send_photo(target_uid, message.photo[-1].file_id,
+                    caption=(prefix + (f"\\n\\n{message.caption}" if message.caption else ""))[:1024])
+            elif message.document:
+                await context.bot.send_document(target_uid, message.document.file_id,
+                    caption=(prefix + (f"\\n\\n{message.caption}" if message.caption else ""))[:1024])
+            elif message.text:
+                await context.bot.send_message(target_uid, f"{prefix}\\n\\n{message.text}")
+            else:
+                await message.reply_text("Send text, a photo, or a document. Add text as a photo/document caption if needed.")
+                return
+        except Exception:
+            log.exception("Could not send admin reply for crypto order %s", order_id)
+            await message.reply_text("Could not deliver the message. The order status remains unchanged.")
+            return
+        with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Message sent to user for order #{order_id}. Order status was not changed.",
+            reply_markup=kb([[("📋 Open order", f"crypto_order_view_{order_id}")], [("🪙 Crypto orders", "admin_crypto_orders")]]))
         return
 
     if pending and pending["action"] in ("sell_user_chat", "sell_admin_chat"):
