@@ -1185,8 +1185,8 @@ async def crypto_callback(update, context, action):
             pending_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE status='pending_admin_approval'").fetchone()[0]
             approved_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE status IN ('payment_verified','completed')").fetchone()[0]
         await q.edit_message_text(
-            f"🪙 CRYPTO ORDERS\\n\\n🛒 Buy orders: {buy_count}\\n💸 Sell orders: {sell_count}\\n"
-            f"⏳ Awaiting approval: {pending_count}\\n✅ Approved / completed: {approved_count}\\n\\nChoose a section:",
+            f"🪙 CRYPTO ORDERS\n\n🛒 Buy orders: {buy_count}\n💸 Sell orders: {sell_count}\n"
+            f"⏳ Awaiting approval: {pending_count}\n✅ Approved / completed: {approved_count}\n\nChoose a section:",
             reply_markup=kb([[("🛒 Buy orders","crypto_orders_buy"),("💸 Sell orders","crypto_orders_sell")],
                              [("✅ Approved orders","crypto_orders_approved")],
                              [("⬅️ Admin Dashboard","admin")]]))
@@ -1221,7 +1221,7 @@ async def crypto_callback(update, context, action):
         elif action == "crypto_orders_approved":
             rows.append([("⏳ All pending orders","crypto_orders_pending")])
         rows.extend([[("⬅️ Crypto orders","admin_crypto_orders")]])
-        await q.edit_message_text(f"{title}\\n\\nSelect an order to inspect, view the original receipt, or message the user.", reply_markup=kb(rows))
+        await q.edit_message_text(f"{title}\n\nSelect an order to inspect, view the original receipt, or message the user.", reply_markup=kb(rows))
         return
 
     if action.startswith("crypto_admin_reply_"):
@@ -1240,7 +1240,7 @@ async def crypto_callback(update, context, action):
             return
         set_pending(uid, "crypto_admin_reply", {"order_id": order_id, "target_user_id": order["user_id"]})
         await q.edit_message_text(
-            f"💬 Reply to {order['side'].upper()} order #{order_id}.\\n\\nSend text, a photo/document with an optional caption, or a photo/document alone. Order status will not change.",
+            f"💬 Reply to {order['side'].upper()} order #{order_id}.\n\nSend text, a photo/document with an optional caption, or a photo/document alone. Order status will not change.",
             reply_markup=kb([[("❌ Cancel", f"crypto_order_view_{order_id}")]]))
         return
 
@@ -4504,12 +4504,12 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
         try:
             if message.photo:
                 await context.bot.send_photo(target_uid, message.photo[-1].file_id,
-                    caption=(prefix + (f"\\n\\n{message.caption}" if message.caption else ""))[:1024])
+                    caption=(prefix + (f"\n\n{message.caption}" if message.caption else ""))[:1024])
             elif message.document:
                 await context.bot.send_document(target_uid, message.document.file_id,
-                    caption=(prefix + (f"\\n\\n{message.caption}" if message.caption else ""))[:1024])
+                    caption=(prefix + (f"\n\n{message.caption}" if message.caption else ""))[:1024])
             elif message.text:
-                await context.bot.send_message(target_uid, f"{prefix}\\n\\n{message.text}")
+                await context.bot.send_message(target_uid, f"{prefix}\n\n{message.text}")
             else:
                 await message.reply_text("Send text, a photo, or a document. Add text as a photo/document caption if needed.")
                 return
