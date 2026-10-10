@@ -1360,6 +1360,14 @@ async def handle_crypto_text(update, context, action, data, value):
         )
         return True
 
+    if action == "sell_network_select":
+        await message.reply_text("Please tap one of the USDT deposit buttons above. I will show the exact account/address information before asking for the amount.")
+        return True
+
+    if action == "sell_network_confirm":
+        await message.reply_text("Please tap the Continue button to enter the USDT amount, or cancel and restart the form.")
+        return True
+
     if action == "sell_account_number":
         digits = "".join(ch for ch in value if ch.isdigit())
         if not digits or digits != value.strip():
@@ -4234,7 +4242,7 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             log.error("Invalid Buy USDT review chat ID; using configured admin accounts")
         for aid in review_targets:
             try:
-                markup = kb([[("🔎 Review order", f"crypto_order_view_{order_id}")]])
+                markup = kb([[("🔎 Review order", f"sell_admin_order_{order_id}" if order["side"] == "sell" else f"crypto_order_view_{order_id}")]])
                 if message.photo:
                     await context.bot.send_photo(aid, message.photo[-1].file_id, caption=caption, reply_markup=markup)
                 else:
