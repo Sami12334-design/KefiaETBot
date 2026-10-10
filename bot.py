@@ -459,6 +459,7 @@ def init_db():
             ("invite_earn_message", "🔗 INVITE & EARN\n\nInvite friends to KefiaETBot using your personal link. When a new user starts the bot through your link, you earn {reward_points} points.\n\n📌 Referral count: {referrals}\n⭐ Referral points earned: {earned_points}\n👛 Current wallet: {wallet_points} points\n💱 Conversion: {points_per_birr} points = 1 ETB\n💵 Estimated wallet value: {wallet_birr} ETB\n\nMinimum withdrawal: {minimum_points} points. Withdrawals are reviewed by admins."),
             ("points_per_birr", "100"),
             ("promoter_ads_active", "1"),
+            ("promoter_ads_submission_limit", "0"),
             ("promoter_question_platforms", "Which social media platforms do you have? Select at least one."),
             ("promoter_question_content", "What type of content do you publish on your channel?"),
             ("promoter_question_followers", "How many followers or subscribers do you have? Enter a whole number."),
@@ -2158,6 +2159,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "promoter_market_start":
         if not setting_enabled("promoter_ads_active"):
             await q.edit_message_text("📣 Promoter submissions are temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
+        try: submission_limit = max(0, int(setting_value("promoter_ads_submission_limit", "0") or 0))
+        except (TypeError, ValueError): submission_limit = 0
+        if submission_limit:
+            with db() as c:
+                current_submissions = c.execute("SELECT COUNT(*) n FROM promoter_ad_submissions WHERE status IN ('pending','approved')").fetchone()["n"]
+            if int(current_submissions) >= submission_limit:
+                await q.edit_message_text("📣 The promoter application limit has been reached for now. Please check back later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
         set_pending(uid, "promoter_market_form", {"step":"platforms","platforms":[],"prices":{}})
         await q.edit_message_text(
             str(setting_value("promoter_question_platforms", "Which social media platforms do you have? Select at least one.")) +
@@ -2875,6 +2883,12 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Promoter submissions are now " + ("AVAILABLE to users." if new_value == "1" else "UNAVAILABLE to users."),
             reply_markup=kb([[("⬅️ Promoter Center","admin_promoters")]])
         )
+    elif action == "promoter_ads_set_limit":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        current = setting_value("promoter_ads_submission_limit", "0")
+        set_pending(uid, "promoter_ads_limit_edit", {})
+        await q.edit_message_text(f"🔢 SET PROMOTER SUBMISSION LIMIT\n\nCurrent limit: {current}\nSend a whole number. Use 0 for unlimited submissions.", reply_markup=kb([[("❌ Cancel","admin_promoters")]]))
     elif action == "promoter_ads_form_settings":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -2980,16 +2994,12 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = setting_value("promoter_target", "100")
         points = setting_value("promoter_points_per_join", "1")
         ads_active = setting_enabled("promoter_ads_active")
-        question_keys = [
-            ("platforms","Platform selection question"),
-            ("content","Content-type question"),
-            ("followers","Follower-count question"),
-            ("link","Channel-link question"),
-            ("prices","Pricing question"),
-        ]
+        try: submission_limit = max(0, int(setting_value("promoter_ads_submission_limit", "0") or 0))
+        except (TypeError, ValueError): submission_limit = 0
         rows = [
             [("📥 Review promoter submissions","promoter_ads_review")],
             [("📝 Edit promoter form","promoter_ads_form_settings")],
+            [("🔢 Set submission limit","promoter_ads_set_limit")],
             [("🔴 Turn submissions off" if ads_active else "🟢 Turn submissions on","promoter_ads_toggle")],
             [("✏️ Edit legacy referral rules","admin_promoter_set_rules")],
             [("📡 Set referral channel","admin_promoter_set_channel")],
@@ -3000,6 +3010,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await q.edit_message_text(
             f"📣 PROMOTER CENTER SETTINGS\n\nPromoter ad submissions: {'🟢 AVAILABLE' if ads_active else '🔴 UNAVAILABLE'}\n"
+            f"Submission limit: {submission_limit if submission_limit else 'Unlimited'} approved/pending profiles\n"
             f"Legacy referral channel: {channel or 'Not set'}\nLegacy target: {target} verified joins\nLegacy points per join: {points}\n\n"
             "Use Review promoter submissions to approve/save or delete submitted channel profiles. "
             "Use Edit promoter form to change the questions users see.",
@@ -3987,6 +3998,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             summary = "\n".join(f"{p.title()}: {v:g} ETB" for p,v in prices.items())
             await message.reply_text("✅ Price saved.\n\nYour prices:\n"+summary+"\n\nYou must set at least one period; set more if you want, or submit now.", reply_markup=kb(rows)); return
         await message.reply_text("Your promoter form step was not recognized. Please restart the form.", reply_markup=kb([[("📢 Start promoter form","promoter_market_start")]])); return
+    if action == "promoter_ads_limit_edit":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        try:
+            limit = int(value)
+            if limit < 0: raise ValueError()
+        except ValueError:
+            await message.reply_text("Enter a whole number: 0 for unlimited, or a positive number for the maximum submissions."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('promoter_ads_submission_limit',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(limit),))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text(f"✅ Promoter submission limit set to {'unlimited' if limit == 0 else limit}.", reply_markup=kb([[("📣 Promoter Center","admin_promoters")]])); return
     if action == "promoter_ads_question_edit":
         if not is_admin(user.id):
             with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
