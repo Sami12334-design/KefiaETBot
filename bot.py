@@ -4350,6 +4350,45 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not message or not message.text: return
     value = message.text.strip()
 
+    # Handle Contact Admin username first so unrelated admin command handlers
+    # cannot consume or interrupt this pending one-setting edit.
+    try:
+        with db() as c:
+            contact_pending = c.execute(
+                "SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)
+            ).fetchone()
+        if contact_pending and contact_pending["action"] == "admin_setting_value" and str(contact_pending["data"] or "") == "contact_admin_username":
+            if not is_admin(user.id):
+                with db() as c:
+                    c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+                await message.reply_text("⛔ Admin access only.")
+                return
+            contact_value = value.strip()
+            if contact_value.lower() in {"off", "none", "disabled"}:
+                contact_value = ""
+            else:
+                contact_value = contact_value.removeprefix("@")
+                if contact_value.lower().startswith(("https://t.me/", "http://t.me/")):
+                    contact_value = contact_value.split("t.me/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", contact_value):
+                    await message.reply_text("Invalid Telegram username. Send @username or https://t.me/username, or send 'off' to hide Contact Admin.")
+                    return
+            with db() as c:
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    ("contact_admin_username", contact_value)
+                )
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text(
+                "✅ Contact Admin profile saved." if contact_value else "✅ Contact Admin profile link hidden.",
+                reply_markup=kb([[("📞 Contact & Support","admin_setgroup_contact")], [("🛡 Admin Dashboard","admin")]])
+            )
+            return
+    except Exception:
+        log.exception("Failed to save Contact Admin Telegram username for admin %s", user.id)
+        await message.reply_text("⚠️ I couldn't save the Contact Admin username because of a database error. Please check Render Logs and try again.")
+        return
+
     # Admin can reply directly to the forwarded receipt in the private admin chat.
     if is_admin(user.id) and message.reply_to_message:
         caption = message.reply_to_message.caption or ""
