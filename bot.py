@@ -1180,10 +1180,10 @@ async def crypto_callback(update, context, action):
             await q.edit_message_text("⛔ Admin access only.")
             return
         with db() as c:
-            buy_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE side='buy'").fetchone()[0]
-            sell_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE side='sell'").fetchone()[0]
-            pending_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE status='pending_admin_approval'").fetchone()[0]
-            approved_count = c.execute("SELECT COUNT(*) FROM crypto_orders WHERE status IN ('payment_verified','completed')").fetchone()[0]
+            buy_count = c.execute("SELECT COUNT(*) AS count FROM crypto_orders WHERE side='buy'").fetchone()["count"]
+            sell_count = c.execute("SELECT COUNT(*) AS count FROM crypto_orders WHERE side='sell'").fetchone()["count"]
+            pending_count = c.execute("SELECT COUNT(*) AS count FROM crypto_orders WHERE status='pending_admin_approval'").fetchone()["count"]
+            approved_count = c.execute("SELECT COUNT(*) AS count FROM crypto_orders WHERE status IN ('payment_verified','completed')").fetchone()["count"]
         await q.edit_message_text(
             f"🪙 CRYPTO ORDERS\n\n🛒 Buy orders: {buy_count}\n💸 Sell orders: {sell_count}\n"
             f"⏳ Awaiting approval: {pending_count}\n✅ Approved / completed: {approved_count}\n\nChoose a section:",
