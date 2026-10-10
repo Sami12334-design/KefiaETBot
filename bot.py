@@ -302,6 +302,11 @@ def init_db():
           id INTEGER PRIMARY KEY AUTOINCREMENT, invite_link TEXT NOT NULL,
           joined_user_id INTEGER NOT NULL UNIQUE, joined_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS referral_rewards(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, inviter_user_id INTEGER NOT NULL,
+          invited_user_id INTEGER NOT NULL UNIQUE, points_awarded INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS ad_requests(
           id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, kind TEXT NOT NULL,
           details TEXT NOT NULL, duration TEXT, quoted_price REAL, receipt TEXT,
@@ -443,6 +448,9 @@ def init_db():
             ("digital_receipt_upload_prompt", "📸 After paying, upload a clear payment receipt screenshot as a photo or document."),
             ("digital_product_details_template", "🌟 {name} {duration}m\n\n💰 Price: {price} ETB each\n📦 In stock: {stock}\n\n📝 DESCRIPTION\n{description}\n\n✨ FEATURES\n{features}\n\n📌 Important Note:\n{note}\n\n🚨 NOTICE\n{notice}\n\n🎯 Price: {price} ETB / unit\n🛡️ Warranty: {warranty}\n\nTap Buy now when you are ready."),
             ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}"),
+            ("invite_earn_active", "1"),
+            ("invite_earn_message", "🔗 INVITE & EARN\n\nInvite friends to KefiaETBot using your personal link. When a new user starts the bot through your link, you earn {reward_points} points.\n\n📌 Referral count: {referrals}\n⭐ Referral points earned: {earned_points}\n👛 Current wallet: {wallet_points} points\n💱 Conversion: {points_per_birr} points = 1 ETB\n💵 Estimated wallet value: {wallet_birr} ETB\n\nMinimum withdrawal: {minimum_points} points. Withdrawals are reviewed by admins."),
+            ("points_per_birr", "100"),
             ("promoter_rules", "📣 PROMOTER PROGRAM RULES\n\n1. Share only your unique invite link provided by KefiaETBot.\n2. Only real, unique people who join the configured channel through your link count.\n3. Self-joins, duplicate accounts, fake members, and paid/fraudulent joins do not count.\n4. Your progress and points are tracked by the bot.\n5. Once you reach the campaign target, you may request a withdrawal of your available points.\n6. Provide accurate Telebirr or CBE account details. Admins verify activity and payments.\n7. Do not spam or mislead people. Violations may result in disqualification.\n\nTap Agree & Confirm only if you accept these rules."),
             ("promoter_channel", ""),
             ("promoter_target", "100"),
@@ -514,6 +522,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if reward:
                             try: rewarded_points = max(0, int(reward["value"]))
                             except (TypeError, ValueError): rewarded_points = 0
+                        c.execute(
+                            "INSERT OR IGNORE INTO referral_rewards(inviter_user_id,invited_user_id,points_awarded,created_at) VALUES(?,?,?,?)",
+                            (ref, user.id, rewarded_points, now())
+                        )
                         if rewarded_points:
                             c.execute("UPDATE users SET points=points+? WHERE user_id=?", (rewarded_points, ref))
             if rewarded_points:
@@ -1974,15 +1986,35 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = template
         await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress",f"task_{tid}")],[("🧩 More tasks","jobs"),("🏠 Dashboard","home")]]))
     elif action == "invite":
+        if str(setting_value("invite_earn_active", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
+            await q.edit_message_text("🔗 Invite & Earn is temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Dashboard","home")]]))
+            return
         bot = await context.bot.get_me()
         link = f"https://t.me/{bot.username}?start=ref_{uid}"
         with db() as c:
             invited = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by=?", (uid,)).fetchone()["n"]
-        await q.edit_message_text(
-            f"🔗 Invite & Earn\nYour personal bot invite link:\n{link}\n\n"
-            f"Registered referrals: {invited}\n\nReferral points are only added when an active reward campaign is configured and the referral is verified.",
-            reply_markup=kb([[("⬅️ Dashboard","home")]])
-        )
+            rewards = c.execute("SELECT COALESCE(SUM(points_awarded),0) n FROM referral_rewards WHERE inviter_user_id=?", (uid,)).fetchone()["n"]
+            user_row = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
+            pending = c.execute("SELECT COUNT(*) n FROM withdrawals WHERE user_id=? AND status='pending'", (uid,)).fetchone()["n"]
+        wallet_points = int(user_row["points"] or 0) if user_row else 0
+        reward_points = int(setting_value("referral_points", "0") or 0)
+        minimum_points = int(setting_value("min_withdraw_points", "1000") or 1000)
+        points_per_birr = max(1, int(setting_value("points_per_birr", "100") or 100))
+        custom_message = str(setting_value("invite_earn_message", "") or "")
+        template = custom_message or "🔗 INVITE & EARN\n\nInvite friends to KefiaETBot using your personal link. When a new user starts the bot through your link, you earn {reward_points} points.\n\n📌 Referral count: {referrals}\n⭐ Referral points earned: {earned_points}\n👛 Current wallet: {wallet_points} points\n💱 Conversion: {points_per_birr} points = 1 ETB\n💵 Estimated wallet value: {wallet_birr} ETB\n\nMinimum withdrawal: {minimum_points} points. Withdrawals are reviewed by admins."
+        replacements = {
+            "{link}": link, "{reward_points}": str(reward_points), "{referrals}": str(invited),
+            "{earned_points}": str(int(rewards or 0)), "{wallet_points}": str(wallet_points),
+            "{points_per_birr}": str(points_per_birr), "{wallet_birr}": f"{wallet_points / points_per_birr:.2f}",
+            "{minimum_points}": str(minimum_points), "{pending_withdrawals}": str(pending),
+        }
+        for token, value in replacements.items():
+            template = template.replace(token, value)
+        if "{link}" not in custom_message:
+            template += f"\n\n🔗 Your personal invite link:\n{link}"
+        await q.edit_message_text(template, reply_markup=kb([
+            [("🔄 Refresh statistics","invite")], [("👛 My Wallet","wallet"),("💸 Withdraw","withdraw")], [("⬅️ Dashboard","home")]
+        ]))
     elif action.startswith("withdraw_method_"):
         method_slug = action.removeprefix("withdraw_method_")
         method = {"telebirr": "Telebirr", "cbe": "CBE"}.get(method_slug)
@@ -2062,7 +2094,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             minimum = c.execute("SELECT value FROM settings WHERE key='min_withdraw_points'").fetchone()
             promoter = c.execute("SELECT * FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
         minimum_points = int(minimum["value"]) if minimum else 1000
-        points = u["points"] if u else 0
+        points = int(u["points"] or 0) if u else 0
+        points_per_birr = max(1, int(setting_value("points_per_birr", "100") or 100))
         if promoter and int(promoter["completed_count"]) < int(promoter["target_count"]):
             await q.edit_message_text(f"🔒 Promoter withdrawal is locked until you reach your target.\n\nVerified joins: {promoter['completed_count']}/{promoter['target_count']}\nPoints in wallet: {points}\n\nShare your unique referral link with real people, then check your progress again.", reply_markup=kb([[("🔗 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]])); return
         if promoter and points < 1:
@@ -2087,7 +2120,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?, 'withdraw_choose_method','{}') ON CONFLICT(user_id) DO UPDATE SET action='withdraw_choose_method',data='{}'", (uid,))
         await q.edit_message_text(
-            f"💸 WITHDRAW POINTS\n\nAvailable points: {points}\nMinimum: {minimum_points}\n\nChoose where you want to receive your payout:",
+            f"💸 WITHDRAW POINTS\n\nAvailable points: {points}\nEstimated value: {points / points_per_birr:.2f} ETB\nConversion: {points_per_birr} points = 1 ETB\nMinimum: {minimum_points} points\n\nChoose where you want to receive your payout:",
             reply_markup=kb([[("📱 Telebirr","withdraw_method_telebirr"),("🏦 CBE","withdraw_method_cbe")],[("❌ Cancel","home")]])
         )
     elif action == "ads":
@@ -2521,8 +2554,66 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("⚙️ Set prices / limits","admin_settings")],
             [("🌟 Gemini Pro & Products","admin_digital_products")],
             [("📣 Promoter Program","admin_promoters")],
+            [("🔗 Invite & Earn Settings","admin_invite_earn")],
             [("⬅️ Dashboard","home")]
         ]))
+    elif action == "admin_invite_earn":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        active = str(setting_value("invite_earn_active", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        with db() as c:
+            total_users = c.execute("SELECT COUNT(*) n FROM users WHERE referred_by IS NOT NULL").fetchone()["n"]
+            total_rewards = c.execute("SELECT COALESCE(SUM(points_awarded),0) n FROM referral_rewards").fetchone()["n"]
+            referrers = c.execute("SELECT COUNT(DISTINCT referred_by) n FROM users WHERE referred_by IS NOT NULL").fetchone()["n"]
+            total_wallet_points = c.execute("SELECT COALESCE(SUM(points),0) n FROM users").fetchone()["n"]
+        points_per_birr = max(1, int(setting_value("points_per_birr", "100") or 100))
+        reward = int(setting_value("referral_points", "0") or 0)
+        minimum = int(setting_value("min_withdraw_points", "1000") or 1000)
+        preview = str(setting_value("invite_earn_message", "") or "Default Invite & Earn information")[:350]
+        await q.edit_message_text(
+            f"🔗 INVITE & EARN ADMIN\n\nStatus: {'🟢 AVAILABLE' if active else '🔴 UNAVAILABLE'}\n"
+            f"New referred users: {total_users}\nUsers who referred someone: {referrers}\n"
+            f"Recorded referral points awarded: {total_rewards}\nTotal user wallet points: {total_wallet_points}\n\n"
+            f"Reward per referral: {reward} points\nWithdrawal minimum: {minimum} points\n"
+            f"Conversion: {points_per_birr} points = 1 ETB\n\nInformation preview:\n{preview}",
+            reply_markup=kb([
+                [("⏸ Make unavailable" if active else "🟢 Make available","admin_invite_earn_toggle")],
+                [("✏️ Edit displayed information","admin_setkey_invite_earn_message")],
+                [("⭐ Set points per referral","admin_setkey_referral_points"),("💱 Set points per 1 ETB","admin_setkey_points_per_birr")],
+                [("💸 Set withdrawal minimum","admin_setkey_min_withdraw_points")],
+                [("👥 View referral participation","admin_invite_earn_users")],
+                [("🔄 Refresh statistics","admin_invite_earn"),("⬅️ Admin Dashboard","admin")]
+            ])
+        )
+    elif action == "admin_invite_earn_toggle":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        current = str(setting_value("invite_earn_active", "1")).strip().lower() in {"1", "true", "yes", "on"}
+        new_value = "0" if current else "1"
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_active',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_value,))
+        await q.edit_message_text(
+            "🔴 Invite & Earn is now unavailable to users." if new_value == "0" else "🟢 Invite & Earn is now available to users.",
+            reply_markup=kb([[("🔗 Invite & Earn Settings","admin_invite_earn")],[("⬅️ Admin Dashboard","admin")]])
+        )
+    elif action == "admin_invite_earn_users":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            rows = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,u.points,COUNT(r.invited_user_id) referral_count,"
+                "COALESCE(SUM(r.points_awarded),0) earned "
+                "FROM users u LEFT JOIN referral_rewards r ON r.inviter_user_id=u.user_id "
+                "WHERE EXISTS (SELECT 1 FROM users referred WHERE referred.referred_by=u.user_id) "
+                "GROUP BY u.user_id,u.username,u.first_name,u.points ORDER BY referral_count DESC,u.user_id LIMIT 25"
+            ).fetchall()
+        body = ["👥 INVITE & EARN PARTICIPATION","Top 25 referrers · registered referrals and recorded rewards",""]
+        for i, row in enumerate(rows, 1):
+            name = ("@" + row["username"]) if row["username"] else (row["first_name"] or str(row["user_id"]))
+            body.append(f"{i}. {name[:24]} · ID {row['user_id']}\n   Referrals: {int(row['referral_count'] or 0)} · Recorded reward: {int(row['earned'] or 0)} pts · Wallet: {int(row['points'] or 0)} pts")
+        if not rows:
+            body.append("No referral participation recorded yet.")
+        await q.edit_message_text("\n".join(body)[:3900], reply_markup=kb([[("🔄 Refresh","admin_invite_earn_users")],[("⬅️ Invite & Earn Settings","admin_invite_earn")]]))
     elif action == "admin_new_task":
         if not is_admin(uid): return
         with db() as c:
@@ -2574,6 +2665,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "rewards": ("🎁 Rewards & Withdrawals", [
                 ("Minimum withdrawal points", "min_withdraw_points"),
                 ("Referral reward points", "referral_points"),
+                ("Points per 1 ETB (Birr)", "points_per_birr"),
+                ("Invite & Earn displayed information", "invite_earn_message"),
             ]),
             "buyusdt": ("💵 Buy USDT", [
                 ("Buy rate (ETB per USDT)", "buy_usdt_rate"),
@@ -2603,7 +2696,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         allowed_keys = {
             "contact_admin_username",
             "price_ad_product", "price_ad_members", "price_ad_views",
-            "min_withdraw_points", "referral_points", "buy_usdt_rate",
+            "min_withdraw_points", "referral_points", "points_per_birr", "invite_earn_message", "buy_usdt_rate",
             "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
             "buy_usdt_bep20_min", "buy_usdt_bybit_min", "buy_usdt_processing_time",
         }
@@ -2623,6 +2716,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "price_ad_views": "Views promotion price in ETB",
             "min_withdraw_points": "Minimum withdrawal points",
             "referral_points": "Referral reward points",
+            "points_per_birr": "Points required for 1 ETB (Birr)",
+            "invite_earn_message": "Invite & Earn displayed information",
             "buy_usdt_rate": "Buy rate in ETB per USDT",
             "buy_usdt_min": "Minimum Buy USDT order",
             "buy_usdt_max": "Maximum Buy USDT order",
@@ -2636,6 +2731,8 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✏️ Change: {labels[key]}\n\nCurrent value: {current}\n\nSend the new value in one message. "
             + ("Send the admin's Telegram username (for example @yourname), or a https://t.me/username link. Send 'off' to hide the profile link. "
                if key == "contact_admin_username" else
+               "Enter the number of points equal to 1 ETB (for example 100). " if key == "points_per_birr" else
+               "Send the full customer-facing Invite & Earn message (up to 2500 characters). Supported placeholders: {link}, {reward_points}, {referrals}, {earned_points}, {wallet_points}, {points_per_birr}, {wallet_birr}, {minimum_points}, {pending_withdrawals}. " if key == "invite_earn_message" else
                "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours."),
             reply_markup=kb([[("❌ Cancel","admin_settings")]])
         )
@@ -3900,7 +3997,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         allowed_keys = {
             "contact_admin_username",
             "price_ad_product", "price_ad_members", "price_ad_views",
-            "min_withdraw_points", "referral_points", "buy_usdt_rate",
+            "min_withdraw_points", "referral_points", "points_per_birr", "invite_earn_message", "buy_usdt_rate",
             "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
             "buy_usdt_bep20_min", "buy_usdt_bybit_min", "buy_usdt_processing_time",
         }
@@ -3911,6 +4008,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if not value:
             await message.reply_text("Please send a value, or tap Cancel and choose another setting.")
+            return
+        if key == "invite_earn_message":
+            message_value = value.strip()
+            if not message_value or len(message_value) > 2500:
+                await message.reply_text("Invite & Earn information must contain 1–2500 characters. Please try again.")
+                return
+            with db() as c:
+                c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, message_value))
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("✅ Invite & Earn displayed information saved.", reply_markup=kb([[("🔗 Preview / Manage Invite & Earn","admin_invite_earn")],[("🛡 Admin Dashboard","admin")]]))
             return
         if key == "contact_admin_username":
             contact_value = value.strip()
@@ -3936,7 +4043,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         numeric_keys = {
             "price_ad_product", "price_ad_members", "price_ad_views",
-            "referral_points", "buy_usdt_rate", "buy_usdt_min", "buy_usdt_max",
+            "referral_points", "points_per_birr", "buy_usdt_rate", "buy_usdt_min", "buy_usdt_max",
             "buy_usdt_stock", "buy_usdt_bep20_min", "buy_usdt_bybit_min",
         }
         if key in numeric_keys:
@@ -3944,7 +4051,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 number = Decimal(value)
                 if not number.is_finite() or number < 0:
                     raise ValueError()
-                if key in {"buy_usdt_rate", "buy_usdt_min"} and number == 0:
+                if key in {"buy_usdt_rate", "buy_usdt_min", "points_per_birr"} and number == 0:
                     raise ValueError()
                 if key == "buy_usdt_max" and number < Decimal(str(setting_value("buy_usdt_min", "1"))):
                     raise ValueError()
@@ -3953,7 +4060,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except (ValueError, InvalidOperation):
                 await message.reply_text(
                     "That number is invalid. Enter a number greater than or equal to 0. "
-                    "Buy rate and minimum order must be greater than 0; referral points must be a whole number. Try again."
+                    "Buy rate, minimum order, and points-per-Birr conversion must be greater than 0; referral points must be a whole number. Try again."
                 )
                 return
         if key == "min_withdraw_points":
@@ -3982,7 +4089,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
         group = (
             "ads" if key.startswith("price_ad_") else
-            "rewards" if key in {"min_withdraw_points", "referral_points"} else
+            "rewards" if key in {"min_withdraw_points", "referral_points", "points_per_birr", "invite_earn_message"} else
             "buyusdt"
         )
         await message.reply_text(
