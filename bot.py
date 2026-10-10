@@ -4827,6 +4827,83 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if action == "account_buy_receipt":
         await message.reply_text("📸 Please upload your payment screenshot as a photo or document so an admin can review it.")
         return
+    if action == "admin_promoter_withdraw_limit_edit":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        try:
+            minimum=int(value)
+            if minimum<0 or minimum>100000000: raise ValueError()
+        except ValueError:
+            await message.reply_text("Send a whole number from 0 to 100,000,000. Use 0 to skip the point minimum."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('promoter_withdraw_min_points',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(str(minimum),))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+        await message.reply_text(f"Promoter withdrawal minimum saved: {minimum} points.",reply_markup=kb([[( "📣 Promoter Program","admin_promoters")]]))
+        return
+    if action == "promoter_withdraw_account_number":
+        state=decode_pending(data); method=state.get("method","Telebirr")
+        if method=="Telebirr":
+            compact=value.replace(" ","").replace("-","")
+            if not (re.fullmatch(r"09\d{8}",compact) or re.fullmatch(r"\+2519\d{8}",compact) or re.fullmatch(r"2519\d{8}",compact)):
+                await message.reply_text("Invalid Telebirr number. Use 09XXXXXXXX or +2519XXXXXXXX."); return
+            account_number=compact
+        else:
+            if not re.fullmatch(r"\d{13}",value):
+                await message.reply_text("Invalid CBE account number. It must contain exactly 13 digits, numbers only."); return
+            account_number=value
+        set_pending(user.id,"promoter_withdraw_account_name",{"method":method,"account_number":account_number})
+        await message.reply_text("👤 Enter the account holder's full name exactly as registered with the bank/Telebirr.")
+        return
+    if action == "promoter_withdraw_account_name":
+        if len(value)<2 or len(value)>100:
+            await message.reply_text("Please enter the account holder name (2–100 characters)."); return
+        state=decode_pending(data); method=state.get("method","Telebirr"); account_number=state.get("account_number","")
+        with db() as c:
+            c.execute("UPDATE promoter_profiles SET method=?,account_number=?,account_name=?,updated_at=? WHERE user_id=?",(method,account_number,value,now(),user.id))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?",(user.id,))
+            profile=c.execute("SELECT completed_count,target_count FROM promoter_profiles WHERE user_id=?",(user.id,)).fetchone()
+            row=c.execute("SELECT points FROM users WHERE user_id=?",(user.id,)).fetchone()
+        if not profile:
+            await message.reply_text("Promoter profile not found. Please register first."); return
+        points=int(row["points"] or 0) if row else 0
+        target_required=setting_enabled("promoter_withdraw_require_target",True)
+        minimum=max(0,int(setting_value("promoter_withdraw_min_points","1000") or 0))
+        eligible=(not target_required or int(profile["completed_count"])>=int(profile["target_count"])) and points>=max(1,minimum)
+        reply="✅ Your payout information is saved.\n\nMethod: "+method+"\nAccount: "+account_number+"\nAccount holder: "+value+"\n\n"
+        if eligible:
+            reply+="You currently meet the withdrawal rules. Tap Request withdrawal when you're ready."
+            rows=[[( "💸 Request withdrawal","withdraw")],[( "📊 Promoter statistics","promoter_stats")],[( "⬅️ Promoter dashboard","promoter_stats")]]
+        else:
+            reply+="You can withdraw when you meet the configured point limit"+(" and referral target." if target_required else ".")
+            rows=[[( "📊 View progress","promoter_stats")],[( "💸 Check withdrawal eligibility","promoter_withdraw_start")],[( "⬅️ Promoter dashboard","promoter_stats")]]
+        await message.reply_text(reply,reply_markup=kb(rows))
+        await notify_admins(context,f"PROMOTER PAYOUT DETAILS UPDATED\nUser: {user.id}\nMethod: {method}\nAccount: {account_number}\nHolder: {value}")
+        return
+    if action == "promoter_user_chat":
+        if value.lower()=="/done":
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='promoter_user_chat'",(user.id,))
+            await message.reply_text("Chat mode closed."); return
+        for aid in sorted(ADMIN_IDS):
+            try:
+                await context.bot.send_message(aid,f"PROMOTER MESSAGE\nFrom: {user.first_name or 'Promoter'} (@{user.username or 'no_username'})\nUser ID: {user.id}\n\n{value[:3000]}",reply_markup=kb([[( "↩️ Reply to promoter",f"admin_promoter_chat_reply_{user.id}")]]))
+            except Exception: log.warning("Could not forward promoter chat from %s to admin %s",user.id,aid)
+        await message.reply_text("✅ Message sent to the admin team. Send another message or /done to finish.")
+        return
+    if action == "admin_promoter_chat_reply":
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        if value.lower()=="/done":
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='admin_promoter_chat_reply'",(user.id,))
+            await message.reply_text("Reply mode closed."); return
+        state=decode_pending(data); target=int(state.get("user_id",0) or 0)
+        if not target:
+            await message.reply_text("Promoter recipient not found."); return
+        try:
+            await context.bot.send_message(target,f"📩 Message from KefiaETBot admin:\n\n{value[:3500]}")
+            await message.reply_text("✅ Reply sent. Send another message or /done to finish.")
+        except Exception:
+            await message.reply_text("Could not deliver the reply. The user may have blocked the bot.")
+        return
     if action == "promoter_choose_method":
         await message.reply_text("Please tap Telebirr or CBE using the buttons shown above.")
         return
