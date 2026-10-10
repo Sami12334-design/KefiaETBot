@@ -457,6 +457,8 @@ def init_db():
             ("digital_payment_template", "🌟 Amount to pay: {price} ETB\n\n🏦 {gateway_name}\n\nNumber: {account_number}\nName: {account_name}\n\nSend the exact ETB amount, then upload a clear {gateway_name} receipt screenshot.\n{instructions}\n\n📞 Payment instructions\nAfter payment, upload a clear {gateway_name} receipt screenshot. Once your payment is verified, we will send your private redeem link.\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{warning}"),
             ("invite_earn_active", "1"),
             ("invite_earn_message", "🔗 INVITE & EARN\n\nInvite friends to KefiaETBot using your personal link. When a new user starts the bot through your link, you earn {reward_points} points.\n\n📌 Referral count: {referrals}\n⭐ Referral points earned: {earned_points}\n👛 Current wallet: {wallet_points} points\n💱 Conversion: {points_per_birr} points = 1 ETB\n💵 Estimated wallet value: {wallet_birr} ETB\n\nMinimum withdrawal: {minimum_points} points. Withdrawals are reviewed by admins."),
+            ("invite_earn_unavailable_message", "🔗 Invite & Earn is temporarily unavailable. Please check back later."),
+            ("invite_earn_unavailable_photo", ""),
             ("points_per_birr", "100"),
             ("promoter_ads_active", "1"),
             ("promoter_ads_submission_limit", "0"),
@@ -2056,7 +2058,30 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]))
     elif action == "invite":
         if str(setting_value("invite_earn_active", "1")).strip().lower() not in {"1", "true", "yes", "on"}:
-            await q.edit_message_text("🔗 Invite & Earn is temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Dashboard","home")]]))
+            unavailable_message = str(setting_value(
+                "invite_earn_unavailable_message",
+                "🔗 Invite & Earn is temporarily unavailable. Please check back later."
+            ) or "").strip()
+            unavailable_photo = str(setting_value("invite_earn_unavailable_photo", "") or "").strip()
+            back_markup = kb([[("⬅️ Dashboard", "home")]])
+            if unavailable_photo:
+                try:
+                    await q.message.reply_photo(
+                        photo=unavailable_photo,
+                        caption=unavailable_message[:1000] or None,
+                        reply_markup=back_markup
+                    )
+                except Exception:
+                    log.exception("Could not show configured Invite & Earn unavailable image")
+                    await q.edit_message_text(
+                        unavailable_message or "Invite & Earn is temporarily unavailable.",
+                        reply_markup=back_markup
+                    )
+            else:
+                await q.edit_message_text(
+                    unavailable_message or "Invite & Earn is temporarily unavailable.",
+                    reply_markup=back_markup
+                )
             return
         bot = await context.bot.get_me()
         link = f"https://t.me/{bot.username}?start=ref_{uid}"
@@ -2779,9 +2804,51 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [("✏️ Edit displayed information","admin_setkey_invite_earn_message")],
                 [("⭐ Set points per referral","admin_setkey_referral_points"),("💱 Set points per 1 ETB","admin_setkey_points_per_birr")],
                 [("💸 Set withdrawal minimum","admin_setkey_min_withdraw_points")],
-                [("👥 View referral participation","admin_invite_earn_users")],
+                [("✏️ Edit unavailable notice (text)","admin_invite_unavailable_text")],
+                [("🖼 Set unavailable notice image","admin_invite_unavailable_photo")],
+                [("🗑 Remove notice image","admin_invite_unavailable_clear_photo")],
+                [("👥 Review referral participation","admin_invite_earn_users")],
+                [("💸 Review withdrawal requests","admin_invite_withdrawals")],
                 [("🔄 Refresh statistics","admin_invite_earn"),("⬅️ Admin Dashboard","admin")]
             ])
+        )
+    elif action == "admin_invite_unavailable_text":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            c.execute(
+                "INSERT INTO pending_inputs(user_id,action,data) VALUES(?, 'admin_invite_unavailable_text', '') "
+                "ON CONFLICT(user_id) DO UPDATE SET action='admin_invite_unavailable_text',data=''",
+                (uid,)
+            )
+        await q.edit_message_text(
+            "✏️ Send the complete message users should see when Invite & Earn is unavailable. "
+            "This switches the notice to text mode and removes the configured image. Send /cancel to stop.",
+            reply_markup=kb([[("❌ Cancel","admin_invite_earn")]])
+        )
+    elif action == "admin_invite_unavailable_photo":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            c.execute(
+                "INSERT INTO pending_inputs(user_id,action,data) VALUES(?, 'admin_invite_unavailable_photo', '') "
+                "ON CONFLICT(user_id) DO UPDATE SET action='admin_invite_unavailable_photo',data=''",
+                (uid,)
+            )
+        await q.edit_message_text(
+            "🖼 Send the image users should see when Invite & Earn is unavailable. "
+            "You may add a caption to use as the notice text. Send /cancel to stop.",
+            reply_markup=kb([[("❌ Cancel","admin_invite_earn")]])
+        )
+    elif action == "admin_invite_unavailable_clear_photo":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_unavailable_photo','') "
+                      "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        await q.edit_message_text(
+            "✅ Unavailable notice image removed. The configured text message will be shown instead.",
+            reply_markup=kb([[("🔗 Invite & Earn Management","admin_invite_earn")]])
         )
     elif action == "admin_invite_earn_toggle":
         if not is_admin(uid):
@@ -2804,15 +2871,95 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "COALESCE(SUM(r.points_awarded),0) earned "
                 "FROM users u LEFT JOIN referral_rewards r ON r.inviter_user_id=u.user_id "
                 "WHERE EXISTS (SELECT 1 FROM users referred WHERE referred.referred_by=u.user_id) "
-                "GROUP BY u.user_id,u.username,u.first_name,u.points ORDER BY referral_count DESC,u.user_id LIMIT 25"
+                "GROUP BY u.user_id,u.username,u.first_name,u.points ORDER BY referral_count DESC,u.user_id LIMIT 20"
             ).fetchall()
-        body = ["👥 INVITE & EARN PARTICIPATION","Top 25 referrers · registered referrals and recorded rewards",""]
+        body = ["👥 INVITE & EARN PARTICIPATION", "Choose a referrer to inspect their invited users and recorded rewards.", ""]
+        rows_kb = []
         for i, row in enumerate(rows, 1):
             name = ("@" + row["username"]) if row["username"] else (row["first_name"] or str(row["user_id"]))
-            body.append(f"{i}. {name[:24]} · ID {row['user_id']}\n   Referrals: {int(row['referral_count'] or 0)} · Recorded reward: {int(row['earned'] or 0)} pts · Wallet: {int(row['points'] or 0)} pts")
+            body.append(f"{i}. {name[:24]} · ID {row['user_id']} · Referrals: {int(row['referral_count'] or 0)} · Earned: {int(row['earned'] or 0)} pts · Wallet: {int(row['points'] or 0)} pts")
+            rows_kb.append([(f"🔎 Review {name[:18]} · {int(row['referral_count'] or 0)}", f"admin_invite_earn_user_{row['user_id']}")])
         if not rows:
             body.append("No referral participation recorded yet.")
-        await q.edit_message_text("\n".join(body)[:3900], reply_markup=kb([[("🔄 Refresh","admin_invite_earn_users")],[("⬅️ Invite & Earn Settings","admin_invite_earn")]]))
+        rows_kb.extend([[("🔄 Refresh", "admin_invite_earn_users")],
+                        [("⬅️ Invite & Earn Management", "admin_invite_earn")]])
+        await q.edit_message_text("\n".join(body)[:3900], reply_markup=kb(rows_kb))
+    elif action.startswith("admin_invite_earn_user_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            referrer_id = int(action.rsplit("_", 1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid referrer ID."); return
+        with db() as c:
+            referrer = c.execute("SELECT user_id,username,first_name,points FROM users WHERE user_id=?", (referrer_id,)).fetchone()
+            referrals = c.execute(
+                "SELECT u.user_id,u.username,u.first_name,u.joined_at,r.points_awarded,r.created_at "
+                "FROM users u LEFT JOIN referral_rewards r ON r.invited_user_id=u.user_id "
+                "WHERE u.referred_by=? ORDER BY u.joined_at DESC LIMIT 30",
+                (referrer_id,)
+            ).fetchall()
+        if not referrer:
+            await q.edit_message_text("Referrer not found.", reply_markup=kb([[("⬅️ Participation","admin_invite_earn_users")]])); return
+        referrer_name = ("@" + referrer["username"]) if referrer["username"] else (referrer["first_name"] or str(referrer_id))
+        body = [f"🔎 REFERRAL REVIEW · {referrer_name}", f"User ID: {referrer_id}", f"Current wallet: {int(referrer['points'] or 0)} points", "", "Invited users:"]
+        for invited in referrals:
+            invited_name = ("@" + invited["username"]) if invited["username"] else (invited["first_name"] or str(invited["user_id"]))
+            reward_value = int(invited["points_awarded"] or 0)
+            body.append(f"• {invited_name[:24]} · ID {invited['user_id']} · Reward: {reward_value} pts · Joined: {str(invited['joined_at'] or '')[:10]}")
+        if not referrals:
+            body.append("No invited users found.")
+        await q.edit_message_text("\n".join(body)[:3900], reply_markup=kb([
+            [("⬅️ All referrers", "admin_invite_earn_users")],
+            [("💸 Review withdrawal requests", "admin_invite_withdrawals")],
+            [("⬅️ Invite & Earn Management", "admin_invite_earn")]
+        ]))
+    elif action == "admin_invite_withdrawals":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            pending_withdrawals = c.execute(
+                "SELECT id,user_id,points,payout_method,status,created_at FROM withdrawals WHERE status='pending' ORDER BY id DESC LIMIT 20"
+            ).fetchall()
+        rows_kb = []
+        body = ["💸 INVITE & EARN · WITHDRAWAL REVIEW", "Choose a request to inspect payout details, then approve or reject it.", ""]
+        for wd in pending_withdrawals:
+            body.append(f"Request #{wd['id']} · User {wd['user_id']} · {wd['points']} pts · {wd['payout_method']} · {str(wd['created_at'] or '')[:10]}")
+            rows_kb.append([(f"🔎 Request #{wd['id']} · {wd['points']} pts", f"admin_invite_withdraw_view_{wd['id']}")])
+        if not pending_withdrawals:
+            body.append("There are no pending withdrawal requests.")
+        rows_kb.extend([[("🔄 Refresh", "admin_invite_withdrawals")],
+                        [("📥 All review requests", "admin_queue")],
+                        [("⬅️ Invite & Earn Management", "admin_invite_earn")]])
+        await q.edit_message_text("\n".join(body)[:3900], reply_markup=kb(rows_kb))
+    elif action.startswith("admin_invite_withdraw_view_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try:
+            withdrawal_id = int(action.rsplit("_", 1)[1])
+        except ValueError:
+            await q.edit_message_text("Invalid withdrawal ID."); return
+        with db() as c:
+            wd = c.execute(
+                "SELECT w.*,u.username,u.first_name,u.points wallet_points FROM withdrawals w "
+                "LEFT JOIN users u ON u.user_id=w.user_id WHERE w.id=?",
+                (withdrawal_id,)
+            ).fetchone()
+        if not wd:
+            await q.edit_message_text("Withdrawal request not found.", reply_markup=kb([[("⬅️ Withdrawals", "admin_invite_withdrawals")]])); return
+        body = (f"💸 WITHDRAWAL REQUEST #{withdrawal_id}\n\nUser: {wd['first_name'] or 'Unknown'} "
+                f"(@{wd['username'] or 'no_username'})\nUser ID: {wd['user_id']}\n"
+                f"Points requested: {wd['points']}\nCurrent wallet: {wd['wallet_points'] or 0} points\n"
+                f"Payout method: {wd['payout_method']}\nPayout details: {wd['payout_details']}\n"
+                f"Status: {wd['status']}\nSubmitted: {wd['created_at']}")
+        rows_kb = []
+        if wd["status"] == "pending":
+            rows_kb.append([("✅ Approve", f"approve_wd_{withdrawal_id}"), ("❌ Reject", f"reject_wd_{withdrawal_id}")])
+        if wd["status"] in ("pending", "approved"):
+            rows_kb.append([("📨 Send payout message / proof", f"withdraw_delivery_{withdrawal_id}")])
+        rows_kb.extend([[("⬅️ Pending withdrawals", "admin_invite_withdrawals")],
+                        [("⬅️ Invite & Earn Management", "admin_invite_earn")]])
+        await q.edit_message_text(body[:3900], reply_markup=kb(rows_kb))
     elif action == "admin_new_task":
         if not is_admin(uid): return
         with db() as c:
@@ -3425,6 +3572,21 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
             await message.reply_text("Could not deliver the media. The user may have blocked the bot.")
         return
 
+    # Admin-managed Invite & Earn unavailable notice image.
+    if is_admin(user.id) and current_pending and current_pending["action"] == "admin_invite_unavailable_photo":
+        if not message.photo:
+            await message.reply_text("Please send the notice as a photo, optionally with a caption. Text-only notices can be set from the Invite & Earn Management menu."); return
+        caption = (message.caption or "").strip()
+        if len(caption) > 1000:
+            await message.reply_text("Keep the image caption under 1,000 characters."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_unavailable_photo',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (message.photo[-1].file_id,))
+            if caption:
+                c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_unavailable_message',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (caption,))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text("✅ Unavailable notice image saved." + (" Its caption will be shown with the image." if caption else " The current notice text will be used as its caption."), reply_markup=kb([[("🔗 Invite & Earn Management","admin_invite_earn")]]))
+        return
+
     # Admin can send a photo/document to a marketplace buyer or seller from the listing controls.
     with db() as c:
         current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
@@ -3912,6 +4074,21 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not p:
         await message.reply_text("Use the dashboard buttons to get started.", reply_markup=home_keyboard(is_admin(user.id))); return
     action, data = p["action"], p["data"]
+    if action == "admin_invite_unavailable_text":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        if value == "/cancel":
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("Notice editing cancelled.", reply_markup=kb([[("🔗 Invite & Earn Management","admin_invite_earn")]])); return
+        if not value or len(value) > 3500:
+            await message.reply_text("Send a notice between 1 and 3,500 characters, or /cancel."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_unavailable_message',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (value,))
+            c.execute("INSERT INTO settings(key,value) VALUES('invite_earn_unavailable_photo','') ON CONFLICT(key) DO UPDATE SET value=''" )
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text("✅ Unavailable notice text saved. The image notice has been cleared.", reply_markup=kb([[("🔗 Invite & Earn Management","admin_invite_earn")]]))
+        return
     if action == "admin_market_edit":
         if not is_admin(user.id):
             await message.reply_text("⛔ Admin access only."); return
