@@ -479,6 +479,18 @@ def home_keyboard(admin=False):
     ]
     if admin:
         rows.append([("🛡 Admin Dashboard", "admin")])
+    contact_username = str(setting_value("contact_admin_username", os.getenv("CONTACT_ADMIN_USERNAME", "")) or "").strip()
+    contact_username = contact_username.removeprefix("@")
+    if contact_username.lower().startswith("https://t.me/"):
+        contact_username = contact_username.split("t.me/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", contact_username):
+        rows.append([("📞 Contact Admin", "https://t.me/" + contact_username)])
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton(text, url=data) if data.startswith("https://") else InlineKeyboardButton(text, callback_data=data)
+             for text, data in row]
+            for row in rows
+        ])
+    rows.append([("📞 Contact Admin", "contact_admin")])
     return kb(rows)
 
 
@@ -2009,6 +2021,22 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             u = c.execute("SELECT points FROM users WHERE user_id=?", (uid,)).fetchone()
             pending = c.execute("SELECT COUNT(*) n FROM withdrawals WHERE user_id=? AND status='pending'", (uid,)).fetchone()["n"]
         await q.edit_message_text(f"👛 Wallet\nAvailable points: {u['points'] if u else 0}\nPending withdrawals: {pending}\nPoints have no cash value until the admin sets a conversion and withdrawal policy.", reply_markup=kb([[("💸 Withdraw","withdraw")],[("⬅️ Dashboard","home")]]))
+    elif action == "contact_admin":
+        contact_username = str(setting_value("contact_admin_username", os.getenv("CONTACT_ADMIN_USERNAME", "")) or "").strip()
+        contact_username = contact_username.removeprefix("@")
+        if contact_username.lower().startswith("https://t.me/"):
+            contact_username = contact_username.split("t.me/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", contact_username):
+            await q.edit_message_text(
+                "📞 Contact Admin",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👤 Open Admin Profile", url="https://t.me/" + contact_username)],
+                                                   [InlineKeyboardButton("⬅️ Dashboard", callback_data="home")]])
+            )
+        else:
+            await q.edit_message_text(
+                "📞 Admin contact has not been configured yet. Please check back soon.",
+                reply_markup=kb([[("⬅️ Dashboard","home")]])
+            )
     elif action == "profile":
         with db() as c:
             u = c.execute("SELECT * FROM users WHERE user_id=?", (uid,)).fetchone()
@@ -2523,6 +2551,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "⚙️ Prices & Limits\n\nChoose one service to manage. You’ll see its settings separately, then the bot will ask for one value at a time.",
             reply_markup=kb([
                 [("📣 Ads & Promotion","admin_setgroup_ads")],
+                [("📞 Contact & Support","admin_setgroup_contact")],
                 [("🎁 Rewards & Withdrawals","admin_setgroup_rewards")],
                 [("💵 Buy USDT","admin_setgroup_buyusdt")],
                 [("⬅️ Admin Dashboard","admin")]
@@ -2534,6 +2563,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         group = action.removeprefix("admin_setgroup_")
         groups = {
+            "contact": ("📞 Contact & Support", [
+                ("Admin Telegram username", "contact_admin_username"),
+            ]),
             "ads": ("📣 Ads & Promotion", [
                 ("Product promotion price (ETB)", "price_ad_product"),
                 ("Member promotion price (ETB)", "price_ad_members"),
@@ -2569,6 +2601,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         key = action.removeprefix("admin_setkey_")
         allowed_keys = {
+            "contact_admin_username",
             "price_ad_product", "price_ad_members", "price_ad_views",
             "min_withdraw_points", "referral_points", "buy_usdt_rate",
             "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
@@ -2584,6 +2617,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (uid, "admin_setting_value", key)
             )
         labels = {
+            "contact_admin_username": "Admin Telegram username",
             "price_ad_product": "Product promotion price in ETB",
             "price_ad_members": "Member promotion price in ETB",
             "price_ad_views": "Views promotion price in ETB",
@@ -2600,7 +2634,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         current = setting_value(key, "Not set")
         await q.edit_message_text(
             f"✏️ Change: {labels[key]}\n\nCurrent value: {current}\n\nSend the new value in one message. "
-            "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours.",
+            + ("Send the admin's Telegram username (for example @yourname), or a https://t.me/username link. Send 'off' to hide the profile link. "
+               if key == "contact_admin_username" else
+               "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours."),
             reply_markup=kb([[("❌ Cancel","admin_settings")]])
         )
     elif action == "admin_promoters":
@@ -3862,6 +3898,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         key = str(data or "")
         allowed_keys = {
+            "contact_admin_username",
             "price_ad_product", "price_ad_members", "price_ad_views",
             "min_withdraw_points", "referral_points", "buy_usdt_rate",
             "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
@@ -3874,6 +3911,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         if not value:
             await message.reply_text("Please send a value, or tap Cancel and choose another setting.")
+            return
+        if key == "contact_admin_username":
+            contact_value = value.strip()
+            if contact_value.lower() in {"off", "none", "disabled"}:
+                contact_value = ""
+            else:
+                contact_value = contact_value.removeprefix("@")
+                if contact_value.lower().startswith("https://t.me/"):
+                    contact_value = contact_value.split("t.me/", 1)[1].split("/", 1)[0].split("?", 1)[0]
+                if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{4,31}", contact_value):
+                    await message.reply_text("Invalid Telegram username. Send @username or https://t.me/username, or send 'off' to hide Contact Admin.")
+                    return
+            with db() as c:
+                c.execute(
+                    "INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (key, contact_value)
+                )
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text(
+                "✅ Contact Admin profile saved." if contact_value else "✅ Contact Admin profile link hidden.",
+                reply_markup=kb([[("📞 Contact & Support","admin_setgroup_contact")], [("🛡 Admin Dashboard","admin")]])
+            )
             return
         numeric_keys = {
             "price_ad_product", "price_ad_members", "price_ad_views",
