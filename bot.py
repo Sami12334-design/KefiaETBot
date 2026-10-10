@@ -509,7 +509,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(user)
     # A referral is counted once per Telegram account. Reward is optional and admin-configured.
     arg = context.args[0] if context.args else ""
-    if arg.startswith("ref_") and arg[4:].isdigit():
+    if (str(setting_value("invite_earn_active", "1")).strip().lower() in {"1", "true", "yes", "on"}
+            and arg.startswith("ref_") and arg[4:].isdigit()):
         ref = int(arg[4:])
         if ref != user.id and is_new_user:
             rewarded_points = 0
