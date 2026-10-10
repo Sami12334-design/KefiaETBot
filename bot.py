@@ -1260,8 +1260,8 @@ async def crypto_callback(update, context, action):
             f"🪙 Crypto order #{order['id']}\nSide: {order['side'].upper()}\n"
             f"User: {order['user_id']}\nAmount: {order['amount_usdt']:g} USDT\n"
             f"ETB total: {order['total_etb']:g}\nMethod: {method}\nDestination/details: {details}\n"
-            f"Receiving destination: {order['transfer_destination'] or '—'}\\n"
-            f"Receiving account holder: {order['payout_account_name'] or '—'}\\nStatus: {order['status']}"
+            f"Receiving destination: {order['transfer_destination'] or '—'}\n"
+            f"Receiving account holder: {order['payout_account_name'] or '—'}\nStatus: {order['status']}"
         )
         rows = [[("💬 Message user (text/photo + caption)", f"crypto_admin_reply_{order['id']}")]]
         if order["status"] == "pending_admin_approval":
@@ -1386,8 +1386,8 @@ async def handle_crypto_text(update, context, action, data, value):
         state["destination"] = value.strip()
         set_pending(uid, "buy_usdt_holder_name", state)
         await message.reply_text(
-            "👤 Binance Pay account holder name | የBinance Pay መለያ ባለቤት ስም\\n\\n"
-            "Enter the full name registered to this Binance Pay ID:\\n"
+            "👤 Binance Pay account holder name | የBinance Pay መለያ ባለቤት ስም\n\n"
+            "Enter the full name registered to this Binance Pay ID:\n"
             "ከዚህ Binance Pay ID ጋር የተመዘገበውን ሙሉ ስም ያስገቡ:",
             reply_markup=kb([[(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")]]),
         )
