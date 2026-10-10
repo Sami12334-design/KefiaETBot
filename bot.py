@@ -434,7 +434,7 @@ def init_db():
             ("buy_usdt_destination_template", "🔁 USDT receiving destination | USDT መቀበያ አድራሻ\n\nSend your Binance Pay ID where admin should send the USDT:\nUSDT የሚላክበትን Binance Pay ID ያስገቡ:"),
             ("buy_usdt_payment_template", "Order summary\n• USDT: {amount} USDT\n• Pay: {total} ETB\n\n{payment_icon} {payment_name}\n\nNumber: {payment_number}\nName: {payment_account_name}\n\nSend the exact ETB amount, then upload a clear {payment_name} receipt screenshot.\n{receipt_amharic}\n\nAfter payment:\n{after_payment}\n\n🔍 Required: upload a clear screenshot of the receipt/transaction.\nText-only references are not accepted.\n{payment_warning}"),
             ("buy_usdt_confirmation_template", "✅ Payment proof received!\n\n📦 Your order #{order_id} is now under review.\n⏳ We will process it as soon as possible — instantly when we are online; otherwise, please allow up to {processing_time}.\n\n🙏 Thank you for using."),
-            ("buy_usdt_admin_order_template", "💵 BUY USDT ORDER #{order_id}\nUser ID: {user_id}\nAmount: {amount} USDT\nRate: {rate} ETB/USDT\nTotal: {total} ETB\nReceiving destination: {destination}\nPayment method: {payment_name}\nStatus: Pending Approval"),
+            ("buy_usdt_admin_order_template", "💵 BUY USDT ORDER #{order_id}\nUser ID: {user_id}\nAmount: {amount} USDT\nRate: {rate} ETB/USDT\nTotal: {total} ETB\nReceiving destination: {destination}\nBinance Pay holder: {destination_holder_name}\nPayment method: {payment_name}\nStatus: Pending Approval"),
             ("buy_usdt_amount_invalid", "Please enter a valid positive USDT amount."),
             ("buy_usdt_amount_range_error", "Amount must be between {minimum} and {maximum} USDT."),
             ("buy_usdt_stock_error", "Sorry, only {stock} USDT is currently available."),
@@ -887,9 +887,9 @@ async def create_buy_usdt_order_for_message(update, context, uid, state, slug):
                 setting_value("buy_usdt_stock_error", ""), buy_usdt_values(amount=amount)))
             return
         cur = c.execute(
-            "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,transfer_destination,status,created_at,updated_at) "
-            "VALUES(?,'buy',?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
-            (uid, float(amount), float(rate), float(total), slug, details, state["destination"], now(), now()),
+            "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,payout_account_name,transfer_destination,status,created_at,updated_at) "
+            "VALUES(?,'buy',?,?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
+            (uid, float(amount), float(rate), float(total), slug, details, state.get("destination_holder_name", ""), state["destination"], now(), now()),
         )
         order_id = cur.lastrowid
     vals = buy_usdt_values(amount, total, gateway, order_id, uid, state["destination"])
@@ -923,9 +923,9 @@ async def create_buy_usdt_order(q, uid, state, slug):
                                       reply_markup=kb([[("⬅️ Marketplace", "market")]]))
             return
         cur = c.execute(
-            "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,transfer_destination,status,created_at,updated_at) "
-            "VALUES(?,'buy',?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
-            (uid, float(amount), float(rate), float(total), slug, details, state["destination"], now(), now()),
+            "INSERT INTO crypto_orders(user_id,side,amount_usdt,rate_etb,total_etb,payment_method,payment_details,payout_account_name,transfer_destination,status,created_at,updated_at) "
+            "VALUES(?,'buy',?,?,?,?,?,?,?,'awaiting_payment_proof',?,?)",
+            (uid, float(amount), float(rate), float(total), slug, details, state.get("destination_holder_name", ""), state["destination"], now(), now()),
         )
         order_id = cur.lastrowid
     vals = buy_usdt_values(amount, total, gateway, order_id, uid, state["destination"])
@@ -968,7 +968,7 @@ async def crypto_callback(update, context, action):
         with db() as c:
             pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
         state = decode_pending(pending["data"]) if pending and pending["action"] == "buy_usdt_choose_gateway" else {}
-        if not state or "amount" not in state or "destination" not in state:
+        if not state or "amount" not in state or "destination" not in state or not state.get("destination_holder_name"):
             await q.edit_message_text(setting_value("buy_usdt_state_expired", "Session expired."),
                                       reply_markup=kb([[("⬅️ Marketplace", "market")]]))
             return
@@ -1260,7 +1260,8 @@ async def crypto_callback(update, context, action):
             f"🪙 Crypto order #{order['id']}\nSide: {order['side'].upper()}\n"
             f"User: {order['user_id']}\nAmount: {order['amount_usdt']:g} USDT\n"
             f"ETB total: {order['total_etb']:g}\nMethod: {method}\nDestination/details: {details}\n"
-            f"Receiving destination: {order['transfer_destination'] or '—'}\nStatus: {order['status']}"
+            f"Receiving destination: {order['transfer_destination'] or '—'}\\n"
+            f"Receiving account holder: {order['payout_account_name'] or '—'}\\nStatus: {order['status']}"
         )
         rows = [[("💬 Message user (text/photo + caption)", f"crypto_admin_reply_{order['id']}")]]
         if order["status"] == "pending_admin_approval":
@@ -1382,7 +1383,22 @@ async def handle_crypto_text(update, context, action, data, value):
         if stock is None or amount > stock:
             await message.reply_text(render_digital_template(setting_value("buy_usdt_stock_error", ""), buy_usdt_values(amount=amount)))
             return True
-        state["destination"] = value
+        state["destination"] = value.strip()
+        set_pending(uid, "buy_usdt_holder_name", state)
+        await message.reply_text(
+            "👤 Binance Pay account holder name | የBinance Pay መለያ ባለቤት ስም\\n\\n"
+            "Enter the full name registered to this Binance Pay ID:\\n"
+            "ከዚህ Binance Pay ID ጋር የተመዘገበውን ሙሉ ስም ያስገቡ:",
+            reply_markup=kb([[(setting_value("buy_usdt_cancel_button", "❌ Cancel | አቋርጥ"), "home")]]),
+        )
+        return True
+
+    if action == "buy_usdt_holder_name":
+        holder_name = value.strip()
+        if len(holder_name) < 2 or len(holder_name) > 120:
+            await message.reply_text("Please enter the Binance Pay account holder's name (2–120 characters).")
+            return True
+        state["destination_holder_name"] = holder_name
         methods = enabled_buy_methods()
         if not methods:
             await message.reply_text(setting_value("buy_usdt_no_gateway", "Payment is unavailable."))
@@ -4599,6 +4615,7 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
                                    order_id=order_id, user_id=user.id, destination=order["transfer_destination"] or "",
                                    gateway=buy_usdt_gateway(order["payment_method"] or ""))
             vals["rate"] = f"{order['rate_etb']:g}"
+            vals["destination_holder_name"] = order["payout_account_name"] or ""
             await message.reply_text(render_digital_template(setting_value("buy_usdt_confirmation_template", ""), vals))
             caption = render_digital_template(setting_value("buy_usdt_admin_order_template", ""), vals)
         else:
