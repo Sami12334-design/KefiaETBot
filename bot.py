@@ -471,6 +471,14 @@ def init_db():
             ("promoter_channel", ""),
             ("promoter_target", "100"),
             ("promoter_points_per_join", "1"),
+            ("advertiser_active", "1"),
+            ("advertiser_rules", "📣 ADVERTISING CONDITIONS\n\n1. Admins review every request before publication.\n2. Use only the payment details shown by the bot.\n3. Illegal, deceptive, or prohibited products are not accepted.\n4. Advertising starts only after payment and final approval are verified."),
+            ("advertiser_channels", "Telegram, TikTok, YouTube, Instagram, Facebook"),
+            ("advertiser_payment_info", "Payment information has not been configured yet. Please wait for an admin."),
+            ("advertiser_unavailable_message", "Advertiser service is temporarily unavailable. Please check back later."),
+            ("advertiser_price_day", ""),
+            ("advertiser_price_week", ""),
+            ("advertiser_price_month", ""),
                     ):
             c.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (key,value))
 
@@ -2294,6 +2302,63 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_pending(uid,"advertiser_content",state)
         payment=str(setting_value("advertiser_payment_info","Payment information has not been configured yet."))
         await q.edit_message_text("💰 ADVERTISING QUOTE\n\nProduct type: "+state.get("product_type","Other")+"\nDuration: "+{"day":"Per day","week":"Per week","month":"Per month"}[period]+"\nPrice: "+str(price)+" ETB\n\n🏦 PAYMENT INFORMATION\n"+payment+"\n\n📤 Now send your ad content as text, photo, video, PDF, APK, or another document. Admins will review it and reply here. Do not pay until you have checked the details.",reply_markup=kb([[( "❌ Cancel","ads")]]))
+    elif action == "advertiser_admin":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        active=setting_enabled("advertiser_active",True)
+        with db() as c: count=c.execute("SELECT COUNT(*) n FROM ad_requests WHERE status IN ('pending','quoted','receipt_submitted')").fetchone()["n"]
+        await q.edit_message_text("🛠 ADVERTISER MANAGEMENT\n\nService: "+("🟢 ON" if active else "🔴 OFF")+"\nOpen requests: "+str(count)+"\n\nConfigure the public form, channels, pricing and payment instructions.",reply_markup=kb([[( "📥 Advertiser requests","advertiser_admin_requests")],[( "🔄 Turn service "+("OFF" if active else "ON"),"advertiser_admin_toggle")],[( "✏️ Edit conditions / rules","advertiser_edit_rules")],[( "📡 Edit available channels","advertiser_edit_channels")],[( "💵 Set per-day price","advertiser_edit_price_day")],[( "📅 Set per-week price","advertiser_edit_price_week")],[( "🗓 Set per-month price","advertiser_edit_price_month")],[( "🏦 Edit payment information","advertiser_edit_payment")],[( "🚫 Edit service-off message","advertiser_edit_unavailable")],[( "⬅️ Admin Dashboard","admin")]]))
+    elif action == "advertiser_admin_toggle":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        new="0" if setting_enabled("advertiser_active",True) else "1"
+        with db() as c: c.execute("INSERT INTO settings(key,value) VALUES('advertiser_active',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(new,))
+        await q.edit_message_text("🔴 Advertiser service is OFF." if new=="0" else "🟢 Advertiser service is ON.",reply_markup=kb([[( "🛠 Advertiser management","advertiser_admin")]]))
+    elif action.startswith("advertiser_edit_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        field=action.removeprefix("advertiser_edit_")
+        allowed={"rules":"advertiser_rules","channels":"advertiser_channels","payment":"advertiser_payment_info","unavailable":"advertiser_unavailable_message","price_day":"advertiser_price_day","price_week":"advertiser_price_week","price_month":"advertiser_price_month"}
+        key=allowed.get(field)
+        if not key: await q.edit_message_text("Unknown setting."); return
+        set_pending(uid,"advertiser_admin_setting",{"field":field,"key":key})
+        await q.edit_message_text("Send the new "+field.replace("_"," ")+" value. Send /cancel to stop.\n\nCurrent value:\n"+str(setting_value(key,"") or "(not set)")[:1600],reply_markup=kb([[( "❌ Cancel","advertiser_admin")]]))
+    elif action == "advertiser_admin_requests":
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c: rows=c.execute("SELECT id,user_id,kind,status FROM ad_requests ORDER BY id DESC LIMIT 20").fetchall()
+        buttons=[[(f"#{r['id']} · user {r['user_id']} · {r['status']}",f"advertiser_request_{r['id']}")] for r in rows]
+        buttons.extend([[( "🔄 Refresh","advertiser_admin_requests")],[( "⬅️ Advertiser management","advertiser_admin")],[( "⬅️ Admin Dashboard","admin")]])
+        await q.edit_message_text("📥 ADVERTISER REQUESTS\nChoose a request to inspect and reply.",reply_markup=kb(buttons))
+    elif action.startswith("advertiser_request_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        request_id=action.removeprefix("advertiser_request_")
+        with db() as c: row=c.execute("SELECT * FROM ad_requests WHERE id=?",(request_id,)).fetchone()
+        if not row: await q.edit_message_text("Request not found."); return
+        try: details=json.loads(row["details"] or "{}")
+        except Exception: details={"content_text":row["details"]}
+        body=f"📣 ADVERTISER REQUEST #{request_id}\nUser: {row['user_id']}\nType: {details.get('product_type',row['kind'])}\nDuration: {details.get('duration',row['duration'])}\nPrice: {row['quoted_price'] if row['quoted_price'] is not None else details.get('price','not set')} ETB\nStatus: {row['status']}\nContent: {details.get('content_text','(media attached)')}\nCreated: {row['created_at']}"
+        await q.edit_message_text(body[:3900],reply_markup=kb([[( "💬 Reply to advertiser","advertiser_admin_reply_"+str(request_id))],[( "✅ Mark approved","advertiser_status_approved_"+str(request_id)),( "❌ Reject","advertiser_status_rejected_"+str(request_id))],[( "📥 All advertiser requests","advertiser_admin_requests")],[( "🛠 Advertiser settings","advertiser_admin")],[( "⬅️ Admin Dashboard","admin")]]))
+    elif action.startswith("advertiser_admin_reply_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        request_id=action.removeprefix("advertiser_admin_reply_")
+        with db() as c: row=c.execute("SELECT user_id FROM ad_requests WHERE id=?",(request_id,)).fetchone()
+        if not row: await q.edit_message_text("Request not found."); return
+        set_pending(uid,"admin_ad_message",{"request_id":int(request_id),"target_user_id":int(row["user_id"])})
+        await q.edit_message_text("Send your reply as text, photo, video, PDF, APK or another document.",reply_markup=kb([[( "❌ Cancel","advertiser_request_"+request_id)]]))
+    elif action.startswith("advertiser_status_"):
+        if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
+        parts=action.split("_"); status=parts[2]; request_id=parts[3]
+        if status not in {"approved","rejected"}: await q.edit_message_text("Invalid status."); return
+        with db() as c:
+            row=c.execute("SELECT user_id FROM ad_requests WHERE id=?",(request_id,)).fetchone()
+            if row: c.execute("UPDATE ad_requests SET status=? WHERE id=?",(status,request_id))
+        if row:
+            try: await context.bot.send_message(row["user_id"],f"📣 Your advertiser request #{request_id} was {status}. You can continue messaging the admin from My ad requests.")
+            except Exception: log.warning("Could not notify advertiser request user %s",request_id)
+        await q.edit_message_text(f"Request #{request_id} marked {status}.",reply_markup=kb([[( "📥 Advertiser requests","advertiser_admin_requests")],[( "⬅️ Advertiser management","advertiser_admin")]]))
+    elif action.startswith("advertiser_chat_"):
+        request_id=action.removeprefix("advertiser_chat_")
+        with db() as c: row=c.execute("SELECT id FROM ad_requests WHERE id=? AND user_id=?",(request_id,uid)).fetchone()
+        if not row: await q.edit_message_text("Request not found for your account."); return
+        set_pending(uid,"advertiser_user_message",{"request_id":int(request_id)})
+        await q.edit_message_text("💬 Send your message about this advertiser request. Text, photo, video, PDF, APK and other documents are supported.",reply_markup=kb([[( "❌ Cancel","my_ads")]]))
     elif action == "promoter_market_start":
         if not setting_enabled("promoter_ads_active"):
             await q.edit_message_text("📣 Promoter submissions are temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
@@ -2895,6 +2960,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("⚙️ Set prices / limits","admin_settings")],
             [("🌟 Gemini Pro & Products","admin_digital_products")],
+            [("🛍 Advertiser Management","advertiser_admin")],
             [("📣 Promoter Program Settings","admin_promoters")],
             [("📥 Review Promoter Submissions","promoter_ads_review")],
             [("🔗 Manage Invite & Earn","admin_invite_earn")],
