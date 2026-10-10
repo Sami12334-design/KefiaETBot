@@ -2864,6 +2864,111 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours."),
             reply_markup=kb([[("❌ Cancel","admin_settings")]])
         )
+    elif action == "promoter_ads_toggle":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        new_value = "0" if setting_enabled("promoter_ads_active") else "1"
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES('promoter_ads_active',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (new_value,))
+        await q.edit_message_text(
+            "Promoter submissions are now " + ("AVAILABLE to users." if new_value == "1" else "UNAVAILABLE to users."),
+            reply_markup=kb([[("⬅️ Promoter Center","admin_promoters")]])
+        )
+    elif action == "promoter_ads_form_settings":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        rows = [
+            [("✏️ Platform question","promoter_ads_edit_question_platforms")],
+            [("✏️ Content question","promoter_ads_edit_question_content")],
+            [("✏️ Follower-count question","promoter_ads_edit_question_followers")],
+            [("✏️ Channel-link question","promoter_ads_edit_question_link")],
+            [("✏️ Pricing question","promoter_ads_edit_question_prices")],
+            [("⬅️ Promoter Center","admin_promoters")]
+        ]
+        await q.edit_message_text("📝 EDIT PROMOTER FORM\n\nChoose a question to update. These questions are shown to users while they submit their channel/profile for advertising. Required fields and validation remain enabled.", reply_markup=kb(rows))
+    elif action.startswith("promoter_ads_edit_question_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        field = action.removeprefix("promoter_ads_edit_question_")
+        if field not in {"platforms","content","followers","link","prices"}:
+            await q.edit_message_text("Unknown form question."); return
+        set_pending(uid, "promoter_ads_question_edit", {"field":field})
+        current = setting_value("promoter_question_"+field, "")
+        await q.edit_message_text(f"✏️ EDIT QUESTION · {field.replace('_',' ').title()}\n\nCurrent question:\n{current}\n\nSend the new question text (1–500 characters).", reply_markup=kb([[("❌ Cancel","promoter_ads_form_settings")]]))
+    elif action == "promoter_ads_review":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            submissions = c.execute("SELECT id,user_id,platforms,followers,status FROM promoter_ad_submissions ORDER BY CASE status WHEN 'pending' THEN 0 ELSE 1 END, id DESC LIMIT 30").fetchall()
+        rows = [[(f"{'🕓' if s['status']=='pending' else '✅'} #{s['id']} · {s['platforms'][:25]} · {s['followers']} followers · {s['status']}", f"promoter_ads_view_{s['id']}")] for s in submissions]
+        rows += [[("🔄 Refresh","promoter_ads_review")],[("⬅️ Promoter Center","admin_promoters")]]
+        await q.edit_message_text("📥 PROMOTER SUBMISSIONS\nChoose a submission to review. Pending submissions appear first.", reply_markup=kb(rows))
+    elif action.startswith("promoter_ads_view_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: submission_id = int(action.removeprefix("promoter_ads_view_"))
+        except ValueError:
+            await q.edit_message_text("Invalid submission ID."); return
+        with db() as c:
+            sub = c.execute("SELECT * FROM promoter_ad_submissions WHERE id=?", (submission_id,)).fetchone()
+            u = c.execute("SELECT username,first_name FROM users WHERE user_id=?", (sub["user_id"],)).fetchone() if sub else None
+        if not sub:
+            await q.edit_message_text("Submission not found.", reply_markup=kb([[("⬅️ Submissions","promoter_ads_review")]])); return
+        price_lines = []
+        for period,label in [("price_day","Per day"),("price_week","Per week"),("price_month","Per month")]:
+            if sub[period] is not None: price_lines.append(f"{label}: {sub[period]:g} ETB")
+        username = ("@"+u["username"]) if u and u["username"] else (u["first_name"] if u else str(sub["user_id"]))
+        body = (f"📣 PROMOTER SUBMISSION #{submission_id}\n\nUser: {username} (ID {sub['user_id']})\n"
+                f"Platforms: {sub['platforms']}\nContent type: {sub['content_type']}\nFollowers/subscribers: {sub['followers']}\n"
+                f"Channel/profile link: {sub['channel_link']}\nPrices:\n" + ("\n".join(price_lines) if price_lines else "No prices") +
+                f"\n\nStatus: {sub['status']}\nSubmitted: {sub['created_at']}\nAdmin note: {sub['admin_note'] or 'None'}")
+        rows = []
+        if sub["status"] == "pending": rows.append([("✅ Save / Approve profile","promoter_ads_save_"+str(submission_id))])
+        rows += [[("💬 Message user (text/photo)","promoter_ads_message_"+str(submission_id))],
+                 [("🗑 Delete submission","promoter_ads_delete_confirm_"+str(submission_id))],
+                 [("⬅️ All submissions","promoter_ads_review")]]
+        await q.edit_message_text(body, reply_markup=kb(rows), disable_web_page_preview=True)
+    elif action.startswith("promoter_ads_save_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: submission_id = int(action.removeprefix("promoter_ads_save_"))
+        except ValueError:
+            await q.edit_message_text("Invalid submission ID."); return
+        with db() as c:
+            cur = c.execute("UPDATE promoter_ad_submissions SET status='approved',updated_at=? WHERE id=?", (now(),submission_id))
+            sub = c.execute("SELECT user_id FROM promoter_ad_submissions WHERE id=?", (submission_id,)).fetchone()
+        if not cur.rowcount:
+            await q.edit_message_text("Submission not found."); return
+        if sub:
+            try: await context.bot.send_message(sub["user_id"], f"✅ Your promoter profile submission #{submission_id} has been saved/approved by an admin. We'll contact you if more details are needed.")
+            except Exception: pass
+        await q.edit_message_text("✅ Submission saved/approved.", reply_markup=kb([[("📋 View submission",f"promoter_ads_view_{submission_id}")],[("⬅️ All submissions","promoter_ads_review")]]))
+    elif action.startswith("promoter_ads_delete_confirm_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        submission_id = action.removeprefix("promoter_ads_delete_confirm_")
+        await q.edit_message_text(f"Delete promoter submission #{submission_id}? This permanently removes the saved review.", reply_markup=kb([[("🗑 Yes, delete","promoter_ads_delete_"+submission_id),("Cancel","promoter_ads_view_"+submission_id)]]))
+    elif action.startswith("promoter_ads_delete_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: submission_id = int(action.removeprefix("promoter_ads_delete_"))
+        except ValueError:
+            await q.edit_message_text("Invalid submission ID."); return
+        with db() as c:
+            cur = c.execute("DELETE FROM promoter_ad_submissions WHERE id=?", (submission_id,))
+        await q.edit_message_text("🗑 Submission deleted." if cur.rowcount else "Submission not found.", reply_markup=kb([[("⬅️ All submissions","promoter_ads_review")],[("⬅️ Promoter Center","admin_promoters")]]))
+    elif action.startswith("promoter_ads_message_"):
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        try: submission_id = int(action.removeprefix("promoter_ads_message_"))
+        except ValueError:
+            await q.edit_message_text("Invalid submission ID."); return
+        with db() as c:
+            sub = c.execute("SELECT user_id FROM promoter_ad_submissions WHERE id=?", (submission_id,)).fetchone()
+        if not sub:
+            await q.edit_message_text("Submission not found."); return
+        set_pending(uid, "promoter_ads_admin_message", {"submission_id":submission_id,"target_user_id":int(sub["user_id"])})
+        await q.edit_message_text("💬 Send a text message, a photo with an optional caption, or a document with an optional caption. It will be delivered privately to the promoter.", reply_markup=kb([[("❌ Cancel",f"promoter_ads_view_{submission_id}")]]))
     elif action == "admin_promoters":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -3799,6 +3904,88 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await message.reply_text("✅ Your payout details were saved and admins were notified, but the referral link could not be created yet. Please check My promoter progress later or contact support.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Promotion Center","ads")]]))
         return
+    if action == "promoter_market_form":
+        state = decode_pending(data)
+        step = state.get("step")
+        if not setting_enabled("promoter_ads_active"):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("Promoter submissions are temporarily unavailable.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
+        if step == "content":
+            if not value or len(value) > 500:
+                await message.reply_text("Please enter a short content description (1–500 characters)."); return
+            state["content_type"] = value
+            state["step"] = "followers"
+            set_pending(user.id, "promoter_market_form", state)
+            await message.reply_text(str(setting_value("promoter_question_followers", "How many followers or subscribers do you have? Enter a whole number.")), reply_markup=kb([[("❌ Cancel","ads")]])); return
+        if step == "followers":
+            try:
+                followers = int(value.replace(",","").replace(" ",""))
+                if followers < 0: raise ValueError()
+            except ValueError:
+                await message.reply_text("Enter the follower/subscriber count as a whole number (0 or more)."); return
+            state["followers"] = followers
+            state["step"] = "link"
+            set_pending(user.id, "promoter_market_form", state)
+            await message.reply_text(str(setting_value("promoter_question_link", "Send your public channel or profile link.")), reply_markup=kb([[("❌ Cancel","ads")]])); return
+        if step == "link":
+            link = value.strip()
+            if len(link) > 500 or not (link.startswith(("https://","http://","@"))):
+                await message.reply_text("Send a public profile link beginning with https://, http://, or @username."); return
+            state["channel_link"] = link
+            state["step"] = "choose_price"
+            set_pending(user.id, "promoter_market_form", state)
+            await message.reply_text(str(setting_value("promoter_question_prices", "Set your advertising price in ETB for at least one period.")),
+                reply_markup=kb([[("💵 Per day","promoter_market_price_day")],[("📅 Per week","promoter_market_price_week")],[("🗓 Per month","promoter_market_price_month")],[("❌ Cancel","ads")]])); return
+        if step == "price_amount":
+            try:
+                amount = float(value.replace(",",""))
+                if amount <= 0 or not math.isfinite(amount): raise ValueError()
+            except ValueError:
+                await message.reply_text("Enter a valid price greater than 0 ETB."); return
+            period = state.get("price_period")
+            if period not in {"day","week","month"}:
+                await message.reply_text("Your price step expired. Please choose a period again."); return
+            state.setdefault("prices", {})[period] = amount
+            state.pop("price_period", None)
+            state["step"] = "choose_price"
+            set_pending(user.id, "promoter_market_form", state)
+            prices = state["prices"]
+            rows = []
+            for p,label in [("day","💵 Per day"),("week","📅 Per week"),("month","🗓 Per month")]:
+                if p not in prices: rows.append([(label,"promoter_market_price_"+p)])
+            rows += [[("➕ Set another period","promoter_market_add_price")],[("✅ Submit for admin review","promoter_market_price_done")],[("❌ Cancel","ads")]]
+            summary = "\n".join(f"{p.title()}: {v:g} ETB" for p,v in prices.items())
+            await message.reply_text("✅ Price saved.\n\nYour prices:\n"+summary+"\n\nYou must set at least one period; set more if you want, or submit now.", reply_markup=kb(rows)); return
+        await message.reply_text("Your promoter form step was not recognized. Please restart the form.", reply_markup=kb([[("📢 Start promoter form","promoter_market_start")]])); return
+    if action == "promoter_ads_question_edit":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        field = state.get("field")
+        if field not in {"platforms","content","followers","link","prices"} or not value or len(value) > 500:
+            await message.reply_text("Send a question between 1 and 500 characters."); return
+        with db() as c:
+            c.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("promoter_question_"+field,value))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text("✅ Promoter form question updated.", reply_markup=kb([[("📝 Edit more questions","promoter_ads_form_settings")],[("⬅️ Promoter Center","admin_promoters")]])); return
+    if action == "promoter_ads_admin_message":
+        if not is_admin(user.id):
+            with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+            await message.reply_text("⛔ Admin access only."); return
+        state = decode_pending(data)
+        target_uid = int(state.get("target_user_id",0))
+        submission_id = int(state.get("submission_id",0))
+        if not target_uid or not value:
+            await message.reply_text("Message cannot be empty."); return
+        try:
+            await context.bot.send_message(target_uid, "📩 Message from KefiaETBot admin about your promoter submission:\n\n"+value)
+        except Exception:
+            await message.reply_text("Could not deliver the message. The user may have blocked the bot."); return
+        with db() as c:
+            c.execute("UPDATE promoter_ad_submissions SET admin_note=?,updated_at=? WHERE id=?", (value,now(),submission_id))
+            c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
+        await message.reply_text("✅ Message sent to promoter.", reply_markup=kb([[("📋 View submission",f"promoter_ads_view_{submission_id}")],[("⬅️ Submissions","promoter_ads_review")]])); return
     if action == "admin_promoter_setting":
         if not is_admin(user.id):
             with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
