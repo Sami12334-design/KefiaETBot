@@ -3150,6 +3150,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("🛡 Admin Dashboard\nManage tasks, review payouts and listings, configure prices, and inspect platform statistics.", reply_markup=kb([
             [("➕ Create join task","admin_new_task"),("📋 Manage tasks","admin_tasks")],
             [("📊 Statistics","admin_stats"),("🏆 Task leaderboard","admin_task_leaderboard")],
+            [("👥 Total Bot Users","admin_total_bot_users")],
             [("🛍 Social account listings","admin_marketplace")],
             [("📥 Review requests","admin_queue"),("🪙 Crypto orders","admin_crypto_orders")],
             [("💸 Manage Sell USDT","admin_sell_usdt")],
@@ -3346,6 +3347,15 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             c.execute("INSERT INTO pending_inputs(user_id,action,data) VALUES(?,'admin_task_title','') ON CONFLICT(user_id) DO UPDATE SET action='admin_task_title',data=''", (uid,))
         await q.edit_message_text("Create a task using this format (separate each value with |):\nTask title | @channel or channel ID | verified-join target | points per join | max users\nExample: Join Channel | @ExampleChannel | 50 | 20 | 100\nSet max users to 0 for unlimited. The bot must be an administrator in the channel with invite-link permissions.", reply_markup=kb([[("Cancel","admin")]]))
+    elif action == "admin_total_bot_users":
+        if not is_admin(uid):
+            await q.edit_message_text("⛔ Admin access only."); return
+        with db() as c:
+            total_users = c.execute("SELECT COUNT(*) n FROM users").fetchone()["n"]
+        await q.edit_message_text(
+            f"👥 TOTAL BOT USERS\\n\\nRegistered users: {total_users}",
+            reply_markup=kb([[("🔄 Refresh","admin_total_bot_users")], [("⬅️ Admin Dashboard","admin")]])
+        )
     elif action == "admin_stats":
         if not is_admin(uid): return
         with db() as c:
