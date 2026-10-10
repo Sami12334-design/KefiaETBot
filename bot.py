@@ -3453,12 +3453,36 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ("BEP20 minimum (USDT)", "buy_usdt_bep20_min"),
                 ("Bybit minimum (USDT)", "buy_usdt_bybit_min"),
                 ("Processing time message", "buy_usdt_processing_time"),
+                ("Customer amount prompt", "buy_usdt_amount_template"),
+                ("Receiving destination prompt", "buy_usdt_destination_template"),
+                ("Customer payment instructions", "buy_usdt_payment_template"),
+                ("Order confirmation message", "buy_usdt_confirmation_template"),
+                ("Admin order notification", "buy_usdt_admin_order_template"),
+                ("Invalid amount message", "buy_usdt_amount_invalid"),
+                ("Amount range error message", "buy_usdt_amount_range_error"),
+                ("Stock error message", "buy_usdt_stock_error"),
+                ("Rate error message", "buy_usdt_rate_error"),
+                ("No payment method message", "buy_usdt_no_gateway"),
+                ("Invalid destination message", "buy_usdt_destination_invalid"),
+                ("Configuration error message", "buy_usdt_config_error"),
+                ("Expired session message", "buy_usdt_state_expired"),
+                ("Choose payment method prompt", "buy_usdt_choose_gateway_prompt"),
             ]),
         }
         if group not in groups:
             await q.edit_message_text("That settings group is unavailable.", reply_markup=kb([[("⬅️ Prices & Limits","admin_settings")]]))
             return
         title, items = groups[group]
+        if group == "buyusdt":
+            for gateway_slug, gateway_label in PAYMENT_METHODS.items():
+                for field, field_label in (
+                    ("enabled", "Enabled (true/false)"), ("name", "Button name"),
+                    ("icon", "Icon/emoji"), ("number", "Account/phone number"),
+                    ("account_name", "Account holder"), ("details", "Full payment instructions"),
+                    ("receipt_amharic", "Amharic receipt text"),
+                    ("after_payment", "After-payment instructions"), ("warning", "Warning"),
+                ):
+                    items.append((f"{gateway_label} · {field_label}", f"buy_payment_{gateway_slug}_{field}"))
         rows = []
         for label, key in items:
             current = setting_value(key, "Not set")
@@ -3476,8 +3500,19 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "min_withdraw_points", "referral_points", "points_per_birr", "invite_earn_message", "buy_usdt_rate",
             "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
             "buy_usdt_bep20_min", "buy_usdt_bybit_min", "buy_usdt_processing_time",
+            "buy_usdt_amount_template", "buy_usdt_destination_template", "buy_usdt_payment_template",
+            "buy_usdt_confirmation_template", "buy_usdt_admin_order_template", "buy_usdt_amount_invalid",
+            "buy_usdt_amount_range_error", "buy_usdt_stock_error", "buy_usdt_rate_error",
+            "buy_usdt_no_gateway", "buy_usdt_destination_invalid", "buy_usdt_config_error",
+            "buy_usdt_state_expired", "buy_usdt_choose_gateway_prompt",
         }
-        if key not in allowed_keys:
+        gateway_setting = key.startswith("buy_payment_") and any(
+            key == f"buy_payment_{slug}_{field}"
+            for slug in PAYMENT_METHODS
+            for field in ("enabled", "name", "icon", "number", "account_name", "details",
+                          "receipt_amharic", "after_payment", "warning")
+        )
+        if key not in allowed_keys and not gateway_setting:
             await q.edit_message_text("That setting is not available here.", reply_markup=kb([[("⬅️ Prices & Limits","admin_settings")]]))
             return
         with db() as c:
@@ -3502,16 +3537,34 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "buy_usdt_bep20_min": "BEP20 minimum order",
             "buy_usdt_bybit_min": "Bybit minimum order",
             "buy_usdt_processing_time": "Processing time message",
+            "buy_usdt_amount_template": "Customer amount prompt",
+            "buy_usdt_destination_template": "Receiving destination prompt",
+            "buy_usdt_payment_template": "Customer payment instructions",
+            "buy_usdt_confirmation_template": "Order confirmation message",
+            "buy_usdt_admin_order_template": "Admin order notification",
+            "buy_usdt_amount_invalid": "Invalid amount message",
+            "buy_usdt_amount_range_error": "Amount range error message",
+            "buy_usdt_stock_error": "Stock error message",
+            "buy_usdt_rate_error": "Rate error message",
+            "buy_usdt_no_gateway": "No payment method message",
+            "buy_usdt_destination_invalid": "Invalid destination message",
+            "buy_usdt_config_error": "Configuration error message",
+            "buy_usdt_state_expired": "Expired session message",
+            "buy_usdt_choose_gateway_prompt": "Choose payment method prompt",
         }
+        if gateway_setting:
+            labels[key] = key.replace("buy_payment_", "Payment · ").replace("_", " ").title()
         current = setting_value(key, "Not set")
         await q.edit_message_text(
             f"✏️ Change: {labels[key]}\n\nCurrent value: {current}\n\nSend the new value in one message. "
             + ("Send the admin's Telegram username (for example @yourname), or a https://t.me/username link. Send 'off' to hide the profile link. "
                if key == "contact_admin_username" else
+               "Send true or false to enable/disable this payment method. " if key.startswith("buy_payment_") and key.endswith("_enabled") else
+               "Send the full customer-facing text. You can use placeholders from the current template; send 'off' to clear optional text. " if key.startswith(("buy_usdt_", "buy_payment_")) and key not in {"buy_usdt_rate","buy_usdt_min","buy_usdt_max","buy_usdt_stock","buy_usdt_bep20_min","buy_usdt_bybit_min"} else
                "Enter the number of points equal to 1 ETB (for example 100). " if key == "points_per_birr" else
                "Send the full customer-facing Invite & Earn message (up to 2500 characters). Supported placeholders: {link}, {reward_points}, {referrals}, {earned_points}, {wallet_points}, {points_per_birr}, {wallet_birr}, {minimum_points}, {pending_withdrawals}. " if key == "invite_earn_message" else
                "For prices, rates, stock, and USDT amounts, enter a number only. For processing time, you can send text such as 1–2 hours."),
-            reply_markup=kb([[("❌ Cancel","admin_settings")]])
+            reply_markup=kb([[("❌ Cancel","admin_setgroup_buyusdt" if key.startswith(("buy_usdt_", "buy_payment_")) else "admin_settings")]])
         )
     elif action == "promoter_ads_toggle":
         if not is_admin(uid):
@@ -5535,8 +5588,19 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "min_withdraw_points", "referral_points", "points_per_birr", "invite_earn_message", "buy_usdt_rate",
             "buy_usdt_min", "buy_usdt_max", "buy_usdt_stock",
             "buy_usdt_bep20_min", "buy_usdt_bybit_min", "buy_usdt_processing_time",
+            "buy_usdt_amount_template", "buy_usdt_destination_template", "buy_usdt_payment_template",
+            "buy_usdt_confirmation_template", "buy_usdt_admin_order_template", "buy_usdt_amount_invalid",
+            "buy_usdt_amount_range_error", "buy_usdt_stock_error", "buy_usdt_rate_error",
+            "buy_usdt_no_gateway", "buy_usdt_destination_invalid", "buy_usdt_config_error",
+            "buy_usdt_state_expired", "buy_usdt_choose_gateway_prompt",
         }
-        if key not in allowed_keys:
+        gateway_setting = key.startswith("buy_payment_") and any(
+            key == f"buy_payment_{slug}_{field}"
+            for slug in PAYMENT_METHODS
+            for field in ("enabled", "name", "icon", "number", "account_name", "details",
+                          "receipt_amharic", "after_payment", "warning")
+        )
+        if key not in allowed_keys and not gateway_setting:
             with db() as c:
                 c.execute("DELETE FROM pending_inputs WHERE user_id=?", (user.id,))
             await message.reply_text("That setting is no longer available. Please reopen Prices & Limits.")
@@ -5613,6 +5677,20 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except InvalidOperation:
                 await message.reply_text("Enter a valid maximum amount. Try again.")
                 return
+        if key.startswith("buy_payment_") and key.endswith("_enabled"):
+            normalized = value.strip().lower()
+            if normalized not in {"true", "false", "1", "0", "yes", "no", "on", "off", "enabled", "disabled"}:
+                await message.reply_text("Send true to enable or false to disable this payment method.")
+                return
+            value = "true" if normalized in {"true", "1", "yes", "on", "enabled"} else "false"
+        if key.startswith(("buy_usdt_", "buy_payment_")) and value.strip().lower() in {"off", "none"}:
+            if key in {"buy_usdt_rate","buy_usdt_min","buy_usdt_max","buy_usdt_stock","buy_usdt_bep20_min","buy_usdt_bybit_min","buy_usdt_processing_time"}:
+                await message.reply_text("This setting cannot be cleared. Enter a value instead.")
+                return
+            value = ""
+        if len(value) > 3500:
+            await message.reply_text("Keep this setting under 3,500 characters.")
+            return
         if key == "buy_usdt_processing_time" and not value.strip():
             await message.reply_text("Please enter a short processing-time message.")
             return
