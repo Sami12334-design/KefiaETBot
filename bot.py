@@ -2843,7 +2843,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 label="Admin" if m["sender_role"]=="admin" else "You"
                 body+=f"\n{label} · {m['created_at']}\n{m['message_text'] or ('['+m['message_type']+' attachment]' if m['file_id'] else '')}"
         else: body+="\nNo messages yet."
-        await q.edit_message_text(body[:3900],reply_markup=kb([[("💬 Message admin","account_chat_"+str(listing_id)],[("🔄 Refresh",f"account_purchase_{listing_id}")],[("⬅️ My purchases","account_my_purchases")]]))
+        await q.edit_message_text(body[:3900], reply_markup=kb([[("💬 Message admin", "account_chat_" + str(listing_id))], [("🔄 Refresh", f"account_purchase_{listing_id}")], [("⬅️ My purchases", "account_my_purchases")]]))
     elif action.startswith("account_chat_"):
         try: listing_id=int(action.removeprefix("account_chat_"))
         except ValueError:
