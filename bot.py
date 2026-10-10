@@ -787,7 +787,8 @@ def enabled_sell_payout_methods():
 
 
 def enabled_sell_networks():
-    return [(slug, label) for slug, label in SELL_NETWORKS.items()
+    return [(slug, setting_value(f"sell_network_{slug}_label", label).strip() or label)
+            for slug, label in SELL_NETWORKS.items()
             if setting_enabled(f"sell_network_{slug}_enabled")
             and setting_value(f"sell_network_{slug}_destination", "").strip()]
 
@@ -1006,7 +1007,7 @@ async def crypto_callback(update, context, action):
         with db() as c:
             total=c.execute("SELECT COUNT(*) n FROM crypto_orders WHERE side='sell'").fetchone()["n"]
             opened=c.execute("SELECT COUNT(*) n FROM crypto_orders WHERE side='sell' AND status IN ('awaiting_payment_proof','pending_admin_approval','payment_verified')").fetchone()["n"]
-        await q.edit_message_text(f"💸 SELL USDT MANAGEMENT\n\nOrders: {total}\nOpen orders: {opened}\nStatus: {'ENABLED' if setting_enabled('sell_enabled',True) else 'DISABLED'}",reply_markup=kb([[("📋 All orders","sell_admin_orders_all"),("⏳ Open orders","sell_admin_orders_pending")],[("🟢 Enable / 🔴 Disable","sell_admin_toggle")],[("💱 Tier rates","sell_admin_rates"),("🏦 Payout methods","sell_admin_payouts")],[("📥 USDT deposit methods / IDs","sell_admin_networks")],[("📝 Customer flow messages","sell_admin_messages")],[("⬅️ Admin Dashboard","admin")]])); return
+        await q.edit_message_text(f"💸 SELL USDT MANAGEMENT\n\nOrders: {total}\nOpen orders: {opened}\nStatus: {'ENABLED' if setting_enabled('sell_enabled',True) else 'DISABLED'}",reply_markup=kb([[("📋 All orders","sell_admin_orders_all"),("⏳ Open orders","sell_admin_orders_pending")],[("🟢 Enable / 🔴 Disable","sell_admin_toggle")],[("💱 Tier rates","sell_admin_rates"),("🏦 Payout methods","sell_admin_payouts")],[("📥 USDT deposit methods / IDs","sell_admin_networks")],[("✏️ Edit Sell Form","sell_admin_messages")],[("⬅️ Admin Dashboard","admin")]])); return
     if action == "sell_admin_toggle":
         if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
         val="false" if setting_enabled("sell_enabled",True) else "true"
@@ -1026,16 +1027,25 @@ async def crypto_callback(update, context, action):
         for slug,label in SELL_NETWORKS.items():
             configured=bool(setting_value(f"sell_network_{slug}_destination","").strip())
             rows.append([(f"{'🟢' if setting_enabled(f'sell_network_{slug}_enabled') else '⚪'} {label} · {'ID set' if configured else 'ID missing'}",f"sell_admin_network_{slug}")])
-        rows.append([("⬅️ Back","admin_sell_usdt")]); await q.edit_message_text("📥 Configure each USDT destination ID/address and its enabled status.",reply_markup=kb(rows)); return
+        rows.append([("⬅️ Back","admin_sell_usdt")]); await q.edit_message_text("📥 Configure each customer-facing deposit button. Set its button title and put the complete account/address information and payment instructions in Destination details. A method appears to users only when enabled and details are saved.",reply_markup=kb(rows)); return
     if action.startswith("sell_admin_network_"):
         if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
         slug=action.removeprefix("sell_admin_network_")
         if slug not in SELL_NETWORKS: await q.edit_message_text("Unknown method."); return
         dest=setting_value(f"sell_network_{slug}_destination","") or ""
-        await q.edit_message_text(f"{SELL_NETWORKS[slug]}\nStatus: {'Enabled' if setting_enabled(f'sell_network_{slug}_enabled') else 'Disabled'}\nDestination: {dest or 'Not set'}",reply_markup=kb([[("✏️ Change destination","sell_admin_edit_sell_network_"+slug+"_destination")],[("🟢 Enable / 🔴 Disable","sell_admin_toggle_sell_network_"+slug+"_enabled")],[("⬅️ Back","sell_admin_networks")]])); return
+        button_label=setting_value(f"sell_network_{slug}_label",SELL_NETWORKS[slug]) or SELL_NETWORKS[slug]
+        await q.edit_message_text(
+            f"{SELL_NETWORKS[slug]}\\nCustomer button: {button_label}\\nStatus: {'Enabled' if setting_enabled(f'sell_network_{slug}_enabled') else 'Disabled'}\\nDestination details:\\n{dest or 'Not set'}",
+            reply_markup=kb([
+                [("✏️ Edit customer button title","sell_admin_edit_sell_network_"+slug+"_label")],
+                [("✏️ Edit destination details","sell_admin_edit_sell_network_"+slug+"_destination")],
+                [("🟢 Enable / 🔴 Disable","sell_admin_toggle_sell_network_"+slug+"_enabled")],
+                [("⬅️ Back","sell_admin_networks")]
+            ])
+        ); return
     if action == "sell_admin_messages":
         if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
-        items=[("Unavailable notice","sell_unavailable_message"),("Payout method question","sell_payout_prompt"),("Account number prompt","sell_account_number_prompt"),("Account holder prompt","sell_account_name_prompt"),("Deposit method / rates step","sell_deposit_prompt"),("USDT amount prompt","sell_amount_prompt"),("Destination + transfer proof instructions","sell_receipt_prompt"),("Proof received confirmation","sell_confirmation_message")]
+        items=[("Unavailable notice","sell_unavailable_message"),("Payout method question","sell_payout_prompt"),("Account number prompt","sell_account_number_prompt"),("Account holder prompt","sell_account_name_prompt"),("Step 3 question / rates / instructions","sell_deposit_prompt"),("Deposit account details screen","sell_network_details_prompt"),("USDT amount prompt","sell_amount_prompt"),("Final payment + screenshot instructions","sell_receipt_prompt"),("Proof received confirmation","sell_confirmation_message")]
         rows=[[(f"{label} · {len(setting_value(key,'') or '')} chars",f"sell_admin_edit_{key}")] for label,key in items]; rows.append([("⬅️ Back","admin_sell_usdt")])
         await q.edit_message_text("📝 Edit customer-visible Sell USDT text. Placeholders: {method}, {account_number}, {account_name}, {payout_summary}, {rates}, {network}, {destination}, {amount}, {rate}, {total}, {order_id}.",reply_markup=kb(rows)); return
     if action.startswith("sell_admin_toggle_"):
@@ -1048,7 +1058,7 @@ async def crypto_callback(update, context, action):
     if action.startswith("sell_admin_edit_"):
         if not is_admin(uid): await q.edit_message_text("⛔ Admin access only."); return
         key=action.removeprefix("sell_admin_edit_"); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
-        if key.startswith("sell_network_") and key.endswith("_destination"): allowed.add(key)
+        if key.startswith("sell_network_") and key.endswith(("_destination", "_label")): allowed.add(key)
         if key not in allowed: await q.edit_message_text("Setting not editable here."); return
         set_pending(uid,"sell_admin_setting",{"key":key}); await q.edit_message_text(f"✏️ Edit {key}\nCurrent value:\n{setting_value(key,'(not set)')}\n\nSend the new value. Send 'off' to clear optional text. Rates must be positive numbers.",reply_markup=kb([[("❌ Cancel","admin_sell_usdt")]])); return
     if action in ("sell_admin_orders_all","sell_admin_orders_pending"):
@@ -1110,28 +1120,50 @@ async def crypto_callback(update, context, action):
         await show_sell_networks(q, payout)
         return
 
+    if action.startswith("sell_network_continue_"):
+        slug = action[len("sell_network_continue_"):]
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+            payout = decode_pending(pending["data"]) if pending and pending["action"] == "sell_network_confirm" else {}
+        if slug not in SELL_NETWORKS or not payout or payout.get("network") != slug:
+            await q.edit_message_text("Your session expired. Please restart Sell USDT.", reply_markup=kb([[("⬅️ Marketplace","market")]]))
+            return
+        set_pending(uid, "sell_amount", payout)
+        amount_prompt = setting_value("sell_amount_prompt", "💸 Enter the amount of USDT you will send.\\nDeposit method: {network}\\nCurrent sell rates:\\n{rates}\\n\\nMinimum 1 USDT.")
+        amount_prompt = render_digital_template(amount_prompt, {"network":setting_value(f"sell_network_{slug}_label", SELL_NETWORKS[slug]),"rates":rates_text("sell")})
+        await q.edit_message_text(amount_prompt, reply_markup=kb([[("❌ Cancel | አቋርጥ","home")]]))
+        return
+
     if action.startswith("sell_network_"):
         slug = action[len("sell_network_"):]
         if slug not in SELL_NETWORKS or not setting_enabled(f"sell_network_{slug}_enabled"):
-            await q.edit_message_text("That USDT deposit method is currently disabled.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            await q.edit_message_text("That USDT deposit method is currently disabled.", reply_markup=kb([[("⬅️ Marketplace","market")]]))
             return
         destination = setting_value(f"sell_network_{slug}_destination", "").strip()
         if not destination:
-            await q.edit_message_text("The admin has not configured a deposit destination for this method.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            await q.edit_message_text("The admin has not configured destination details for this method.", reply_markup=kb([[("⬅️ Marketplace","market")]]))
             return
         with db() as c:
             pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
             payout = decode_pending(pending["data"]) if pending and pending["action"] == "sell_network_select" else {}
         if not payout:
-            await q.edit_message_text("Your payout details were not found. Please restart Sell USDT.", reply_markup=kb([[("⬅️ Marketplace", "market")]]))
+            await q.edit_message_text("Your payout details were not found. Please restart Sell USDT.", reply_markup=kb([[("⬅️ Marketplace","market")]]))
             return
-        payout.update({"network": slug, "destination": destination})
-        set_pending(uid, "sell_amount", payout)
-        amount_prompt = setting_value("sell_amount_prompt", "💸 Enter the amount of USDT you will send.\nDeposit method: {network}\nCurrent sell rates:\n{rates}\n\nMinimum 1 USDT.")
-        amount_prompt = render_digital_template(amount_prompt, {"network":SELL_NETWORKS[slug],"rates":rates_text("sell")})
-        await q.edit_message_text(amount_prompt,
-            reply_markup=kb([[("❌ Cancel | አቋርጥ", "home")]]),
+        payout.update({"network":slug, "destination":destination})
+        set_pending(uid, "sell_network_confirm", payout)
+        network_label = setting_value(f"sell_network_{slug}_label", SELL_NETWORKS[slug]).strip() or SELL_NETWORKS[slug]
+        detail_template = setting_value(
+            "sell_network_details_prompt",
+            "💸 USDT deposit details\\n\\nMethod: {network}\\n\\n{destination}\\n\\nAfter completing the payment, send a clear screenshot of the transfer. Keep this information for your records."
         )
+        detail_text = render_digital_template(detail_template, {
+            "network":network_label, "destination":destination,
+            "payout_summary":"", "rates":rates_text("sell")
+        })
+        await q.edit_message_text(detail_text, reply_markup=kb([
+            [("➡️ Continue / Enter USDT amount","sell_network_continue_"+slug)],
+            [("❌ Cancel | አቋርጥ","home")]
+        ]))
         return
 
     if action == "admin_crypto_orders":
@@ -1395,7 +1427,7 @@ async def handle_crypto_text(update, context, action, data, value):
     if action == "sell_admin_setting":
         if not is_admin(uid): await message.reply_text("⛔ Admin access only."); return True
         key=str(state.get("key","")); allowed={"sell_usdt_rate_1_2","sell_usdt_rate_2_5","sell_usdt_rate_5_plus","sell_unavailable_message","sell_payout_prompt","sell_account_number_prompt","sell_account_name_prompt","sell_deposit_prompt","sell_amount_prompt","sell_receipt_prompt","sell_confirmation_message"}
-        if key.startswith("sell_network_") and key.endswith("_destination"): allowed.add(key)
+        if key.startswith("sell_network_") and key.endswith(("_destination", "_label")): allowed.add(key)
         if key not in allowed: await message.reply_text("Invalid setting."); return True
         saved="" if value.lower() in {"off","none"} else value
         if key.startswith("sell_usdt_rate_"):
