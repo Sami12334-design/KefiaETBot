@@ -4392,7 +4392,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Admin can reply directly to the forwarded receipt in the private admin chat.
     if is_admin(user.id) and message.reply_to_message:
         caption = message.reply_to_message.caption or ""
-        import re
         match = re.search(r"DIGITAL ORDER #([0-9]+)", caption)
         if match and value:
             await send_digital_admin_reply(update, context, int(match.group(1)), value, reject=False)
