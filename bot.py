@@ -461,6 +461,9 @@ def init_db():
             ("invite_earn_unavailable_photo", ""),
             ("points_per_birr", "100"),
             ("promoter_ads_active", "1"),
+            ("promoter_withdraw_min_points", "1000"),
+            ("promoter_withdraw_require_target", "1"),
+            ("promoter_chat_enabled", "1"),
             ("promoter_ads_submission_limit", "0"),
             ("promoter_question_platforms", "Which social media platforms do you have? Select at least one."),
             ("promoter_question_content", "What type of content do you publish on your channel?"),
@@ -2385,9 +2388,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minimum_points = int(minimum["value"]) if minimum else 1000
         points = int(u["points"] or 0) if u else 0
         points_per_birr = max(1, int(setting_value("points_per_birr", "100") or 100))
-        if promoter and int(promoter["completed_count"]) < int(promoter["target_count"]):
+        if promoter and setting_enabled("promoter_withdraw_require_target", True) and int(promoter["completed_count"]) < int(promoter["target_count"]):
             await q.edit_message_text(f"🔒 Promoter withdrawal is locked until you reach your target.\n\nVerified joins: {promoter['completed_count']}/{promoter['target_count']}\nPoints in wallet: {points}\n\nShare your unique referral link with real people, then check your progress again.", reply_markup=kb([[("🔗 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]])); return
-        if promoter and points < 1:
+        if promoter and points < max(1, int(setting_value("promoter_withdraw_min_points", "1000") or 0)):
             await q.edit_message_text("You have no points available to withdraw yet.", reply_markup=kb([[("📊 My promoter progress","promoter_stats")],[("⬅️ Dashboard","home")]])); return
         if points < minimum_points and not promoter:
             await q.edit_message_text(f"💸 Withdrawal unavailable yet.\nYour points: {points}\nMinimum: {minimum_points} points.\nAdmins can change this limit.", reply_markup=kb([[("⬅️ Dashboard","home")]])); return
@@ -2721,7 +2724,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             msg += f"\n🔗 Your unique channel referral link:\n{profile['invite_link']}\n\nShare this link with real people. Only verified unique joins count."
         if completed >= target:
             msg += "\n\n🎉 Target reached! you can request withdrawal of your available points."
-        await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress","promoter_stats")],[("💸 Withdraw points","withdraw")],[("⬅️ Promotion Center","ads")]]))
+        await q.edit_message_text(msg, reply_markup=kb([[("🔄 Refresh progress","promoter_stats")],[("📊 Statistics","promoter_stats")],[("💬 Chat with admin","promoter_chat")],[("💸 Withdraw","promoter_withdraw_start")],[("⬅️ Promotion Center","ads")]]))
     elif action in ("ad_product","ad_members","ad_views"):
         labels = {"ad_product":"Product promotion","ad_members":"Channel member campaign","ad_views":"Views / reach campaign"}
         with db() as c:
@@ -3562,6 +3565,10 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📡 Set referral channel","admin_promoter_set_channel")],
             [("🎯 Set referral target","admin_promoter_set_target")],
             [("⭐ Set referral points","admin_promoter_set_points")],
+            [("💰 Set withdrawal point limit","admin_promoter_withdraw_limit")],
+            [("🔒 Require referral target: " + ("ON" if setting_enabled("promoter_withdraw_require_target", True) else "OFF"),"admin_promoter_toggle_target_rule")],
+            [("💬 Promoter chat inbox","admin_promoter_chat_inbox")],
+            [("📈 Promoter statistics","admin_promoter_statistics")],
             [("👥 View promoter users","admin_promoter_users")],
             [("⬅️ Admin Dashboard","admin")]
         ]
