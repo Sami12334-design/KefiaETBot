@@ -2353,8 +2353,19 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cap = "∞" if not int(task["participant_limit"] or 0) else str(task["participant_limit"])
             state = "🟢" if task["active"] and task["completed_count"] < task["target"] else "⏸"
             rows.append([(f"{state} #{task['id']} {task['title']} · {assigned}/{cap}", f"admintask_view_{task['id']}")])
-        rows += [[("🏆 Overall leaderboard","admin_task_leaderboard")],[("⬅️ Admin Dashboard","admin")]]
-        await q.edit_message_text("📋 TASK MANAGER\nOpen a task to review its progress, edit settings, pause it or remove it.", reply_markup=kb(rows))
+        rows += [
+            [("➕ Create new task","admin_new_task")],
+            [("🏆 Overall leaderboard","admin_task_leaderboard")],
+            [("⬅️ Admin Dashboard","admin")]
+        ]
+        await q.edit_message_text(
+            "📋 MANAGE DAILY TASKS\n\n"
+            "Choose a task to open its control panel. From there you can update its details, "
+            "change the message users see, pause/resume it, review participants, or delete it.\n\n"
+            "🟢 Active · ⏸ Paused or target reached\n"
+            "The personal invite link is generated separately for each participant and cannot be edited.",
+            reply_markup=kb(rows)
+        )
     elif action == "admin_task_leaderboard":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
@@ -2408,11 +2419,13 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             body += "\nNo users have claimed this task yet."
         rows = [
             [("✏️ Edit title","admintask_edit_title_" + str(tid)),("📣 Edit channel","admintask_edit_channel_" + str(tid))],
-            [("🎯 Edit target","admintask_edit_target_" + str(tid)),("💰 Edit reward","admintask_edit_points_" + str(tid))],
-            [("👥 Edit user limit","admintask_edit_limit_" + str(tid))],
-            [("✍️ Edit full task message (link protected)","admintask_message_edit_" + str(tid)),("♻️ Reset message","admintask_message_reset_" + str(tid))],
-            [("🏆 Task leaderboard","admintask_leaderboard_" + str(tid))],
-            [("⏸ Pause / Resume","admintask_toggle_" + str(tid)),("🗑 Remove","admintask_delete_confirm_" + str(tid))],
+            [("🎯 Edit join target","admintask_edit_target_" + str(tid)),("💰 Edit reward","admintask_edit_points_" + str(tid))],
+            [("👥 Edit participant limit","admintask_edit_limit_" + str(tid))],
+            [("📝 Edit user-facing message","admintask_message_edit_" + str(tid))],
+            [("♻️ Reset message to default","admintask_message_reset_" + str(tid))],
+            [("📊 View participant stats","admintask_leaderboard_" + str(tid))],
+            [("⏸ Pause / Resume task","admintask_toggle_" + str(tid))],
+            [("🗑 Delete task","admintask_delete_confirm_" + str(tid))],
             [("⬅️ All tasks","admin_tasks")]
         ]
         await q.edit_message_text(body, reply_markup=kb(rows))
@@ -2430,13 +2443,14 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         template = setting_value(f"task_message_template_{tid}", default_task_message_template())
         prompt = (
             f"✍️ EDIT CUSTOMER MESSAGE · TASK #{tid} — {task['title']}\n\n"
-            "You can edit the full customer-facing task message: headings, emojis, reward text, channel line, progress/status wording, and sharing instructions. "
-            "Keep {{PERSONAL_INVITE_LINK}} exactly once; the bot automatically inserts each user's own personal invite link there. "
-            "That marker/link is protected and must not be changed or removed.\n\n"
-            "Available placeholders:\n"
+            "Edit the complete message shown to users when they open this task. You can add new information, update any wording, or remove lines by changing the template below. "
+            "This is the main place to manage the default task information users see.\n\n"
+            "IMPORTANT: Keep {{PERSONAL_INVITE_LINK}} exactly once. The bot automatically replaces it with each participant's own personal invite link, so this marker is protected and cannot be removed.\n\n"
+            "Available placeholders (keep the braces):\n"
             "{title} · {points} · {channel} · {completed_count} · {target} · {participants} · {status}\n\n"
-            "Maximum 3000 characters. Use the Cancel button below to leave without saving.\n\n"
-            "CURRENT TEMPLATE:\n" + template
+            "Send the complete updated message, not only the part you want to change. Maximum 3000 characters. "
+            "Choose Cancel to leave without saving, or use “Reset message to default” from the task control panel to restore the original message.\n\n"
+            "CURRENT MESSAGE TEMPLATE:\n" + template
         )
         set_pending(uid, "admin_task_message_template", {"task_id":tid})
         await q.edit_message_text(prompt, reply_markup=kb([[("Cancel","admintask_message_cancel_" + str(tid))]]))
