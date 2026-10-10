@@ -3581,7 +3581,9 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if sub["status"] == "pending": rows.append([("✅ Save / Approve profile","promoter_ads_save_"+str(submission_id))])
         rows += [[("💬 Message user (text/photo)","promoter_ads_message_"+str(submission_id))],
                  [("🗑 Delete submission","promoter_ads_delete_confirm_"+str(submission_id))],
-                 [("⬅️ All elif action == "admin_promoter_withdraw_limit":
+                 [("⬅️ All submissions","promoter_ads_review")]]
+        await q.edit_message_text(body, reply_markup=kb(rows), disable_web_page_preview=True)
+    elif action == "admin_promoter_withdraw_limit":
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
         current=setting_value("promoter_withdraw_min_points","1000")
@@ -3633,8 +3635,6 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text("⛔ Admin access only."); return
         with db() as c: c.execute("DELETE FROM pending_inputs WHERE user_id=? AND action='admin_promoter_chat_reply'",(uid,))
         await q.edit_message_text("Chat reply mode closed.",reply_markup=kb([[( "💬 Promoter chat inbox","admin_promoter_chat_inbox")],[( "⬅️ Promoter Program","admin_promoters")]]))
-    submissions","promoter_ads_review")]]
-        await q.edit_message_text(body, reply_markup=kb(rows), disable_web_page_preview=True)
     elif action.startswith("promoter_ads_save_"):
         if not is_admin(uid):
             await q.edit_message_text("⛔ Admin access only."); return
