@@ -3977,6 +3977,43 @@ async def handle_receipt_media(update: Update, context: ContextTypes.DEFAULT_TYP
     # Advertiser submissions and replies accept photos, videos, animations, and documents.
     with db() as c:
         current_pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (user.id,)).fetchone()
+    if current_pending and current_pending["action"] in {"promoter_user_chat","admin_promoter_chat_reply"}:
+        chat_action=current_pending["action"]
+        state=decode_pending(current_pending["data"])
+        caption=(message.caption or "").strip()
+        media_type=None; file_id=None
+        if message.photo: media_type="photo"; file_id=message.photo[-1].file_id
+        elif message.document: media_type="document"; file_id=message.document.file_id
+        elif message.video: media_type="video"; file_id=message.video.file_id
+        else:
+            await message.reply_text("Please send an image/photo, video, or document, optionally with a caption."); return
+        if chat_action=="promoter_user_chat":
+            for aid in sorted(ADMIN_IDS):
+                try:
+                    note=f"💬 PROMOTER MEDIA MESSAGE\nFrom: {user.first_name or 'Promoter'} (@{user.username or 'no_username'})\nUser ID: {user.id}\nCaption: {caption[:450] or '(no caption)'}"
+                    markup=kb([[( "↩️ Reply to promoter",f"admin_promoter_chat_reply_{user.id}")]])
+                    if media_type=="photo": await context.bot.send_photo(aid,file_id,caption=note[:1024],reply_markup=markup)
+                    elif media_type=="document": await context.bot.send_document(aid,file_id,caption=note[:1024],reply_markup=markup)
+                    else: await context.bot.send_video(aid,file_id,caption=note[:1024],reply_markup=markup)
+                except Exception: log.warning("Could not forward promoter media from %s to admin %s",user.id,aid)
+            await message.reply_text("✅ Media sent to the admin team. You can send another message or /done to finish.")
+            return
+        if not is_admin(user.id):
+            await message.reply_text("⛔ Admin access only."); return
+        target=int(state.get("user_id",0) or 0)
+        if not target:
+            await message.reply_text("Promoter recipient not found."); return
+        try:
+            note=("📩 Photo from KefiaETBot admin" if media_type=="photo" else "📩 File from KefiaETBot admin")
+            if caption: note+="\n\n"+caption[:850]
+            if media_type=="photo": await context.bot.send_photo(target,file_id,caption=note[:1024])
+            elif media_type=="document": await context.bot.send_document(target,file_id,caption=note[:1024])
+            else: await context.bot.send_video(target,file_id,caption=note[:1024])
+            await message.reply_text("✅ Media reply sent. Send another message or /done to finish.")
+        except Exception:
+            await message.reply_text("Could not deliver the media. The promoter may have blocked the bot.")
+        return
+
     if current_pending and current_pending["action"] in {"advertiser_content","advertiser_user_message","admin_ad_message"}:
         pending_action=current_pending["action"]; state=decode_pending(current_pending["data"])
         request_id=int(state.get("request_id",0) or 0); target=int(state.get("target_user_id",0) or 0)
