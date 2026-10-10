@@ -312,6 +312,13 @@ def init_db():
           details TEXT NOT NULL, duration TEXT, quoted_price REAL, receipt TEXT,
           status TEXT NOT NULL DEFAULT 'pending', created_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS promoter_ad_submissions(
+          id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+          platforms TEXT NOT NULL, content_type TEXT NOT NULL, followers INTEGER NOT NULL,
+          channel_link TEXT NOT NULL, price_day REAL, price_week REAL, price_month REAL,
+          status TEXT NOT NULL DEFAULT 'pending', admin_note TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS promoter_profiles(
           user_id INTEGER PRIMARY KEY, method TEXT NOT NULL, account_number TEXT NOT NULL,
           account_name TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
@@ -451,6 +458,12 @@ def init_db():
             ("invite_earn_active", "1"),
             ("invite_earn_message", "🔗 INVITE & EARN\n\nInvite friends to KefiaETBot using your personal link. When a new user starts the bot through your link, you earn {reward_points} points.\n\n📌 Referral count: {referrals}\n⭐ Referral points earned: {earned_points}\n👛 Current wallet: {wallet_points} points\n💱 Conversion: {points_per_birr} points = 1 ETB\n💵 Estimated wallet value: {wallet_birr} ETB\n\nMinimum withdrawal: {minimum_points} points. Withdrawals are reviewed by admins."),
             ("points_per_birr", "100"),
+            ("promoter_ads_active", "1"),
+            ("promoter_question_platforms", "Which social media platforms do you have? Select at least one."),
+            ("promoter_question_content", "What type of content do you publish on your channel?"),
+            ("promoter_question_followers", "How many followers or subscribers do you have? Enter a whole number."),
+            ("promoter_question_link", "Send your public channel or profile link."),
+            ("promoter_question_prices", "Set your advertising price in ETB for at least one period: per day, per week, or per month."),
             ("promoter_rules", "📣 PROMOTER PROGRAM RULES\n\n1. Share only your unique invite link provided by KefiaETBot.\n2. Only real, unique people who join the configured channel through your link count.\n3. Self-joins, duplicate accounts, fake members, and paid/fraudulent joins do not count.\n4. Your progress and points are tracked by the bot.\n5. Once you reach the campaign target, you may request a withdrawal of your available points.\n6. Provide accurate Telebirr or CBE account details. Admins verify activity and payments.\n7. Do not spam or mislead people. Violations may result in disqualification.\n\nTap Agree & Confirm only if you accept these rules."),
             ("promoter_channel", ""),
             ("promoter_target", "100"),
@@ -2128,7 +2141,7 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         with db() as c:
             c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
         await q.edit_message_text("📣 Promotion / Ads Center\n\nChoose what you want to do:", reply_markup=kb([
-            [("📢 ቻናል አለኝ፣ ማስተዋወቅ እፈልጋለሁ (Promoter)","promoter_start")],
+            [("📢 ቻናል አለኝ፣ ማስተዋወቅ እፈልጋለሁ (Promoter)","promoter_market_start")],
             [("🛍 ምርቴን ማስታወቅ እፈልጋለሁ (Advertiser)","advertiser_start")],
             [("📊 My promoter progress","promoter_stats")],
             [("📋 My ad requests","my_ads")],
@@ -2142,6 +2155,105 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [("📋 My ad requests","my_ads")],
             [("⬅️ Promotion Center","ads")]
         ]))
+    elif action == "promoter_market_start":
+        if not setting_enabled("promoter_ads_active"):
+            await q.edit_message_text("📣 Promoter submissions are temporarily unavailable. Please check back later.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
+        set_pending(uid, "promoter_market_form", {"step":"platforms","platforms":[],"prices":{}})
+        await q.edit_message_text(
+            str(setting_value("promoter_question_platforms", "Which social media platforms do you have? Select at least one.")) +
+            "\n\nChoose one or more platforms, then tap Continue.",
+            reply_markup=kb([
+                [("Telegram","promoter_market_platform_telegram"),("TikTok","promoter_market_platform_tiktok")],
+                [("YouTube","promoter_market_platform_youtube"),("Instagram","promoter_market_platform_instagram")],
+                [("Facebook","promoter_market_platform_facebook"),("Other","promoter_market_platform_other")],
+                [("✅ Continue","promoter_market_platform_continue")],
+                [("❌ Cancel","ads")]
+            ])
+        )
+    elif action.startswith("promoter_market_platform_"):
+        if not setting_enabled("promoter_ads_active"):
+            await q.edit_message_text("📣 Promoter submissions are temporarily unavailable.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+        if not pending or pending["action"] != "promoter_market_form":
+            await q.edit_message_text("Your promoter form expired. Please start again.", reply_markup=kb([[("📢 Start promoter form","promoter_market_start")]])); return
+        state = decode_pending(pending["data"])
+        platform = action.removeprefix("promoter_market_platform_")
+        if platform == "continue":
+            selected = state.get("platforms", [])
+            if not selected:
+                await q.answer("Choose at least one platform before continuing.", show_alert=True); return
+            state["step"] = "content"
+            set_pending(uid, "promoter_market_form", state)
+            await q.edit_message_text(str(setting_value("promoter_question_content", "What type of content do you publish on your channel?")), reply_markup=kb([[("❌ Cancel","ads")]]))
+            return
+        platform_names = {"telegram":"Telegram","tiktok":"TikTok","youtube":"YouTube","instagram":"Instagram","facebook":"Facebook","other":"Other"}
+        if platform not in platform_names:
+            await q.answer("Unknown platform."); return
+        selected = list(state.get("platforms", []))
+        if platform in selected: selected.remove(platform)
+        else: selected.append(platform)
+        state["platforms"] = selected
+        set_pending(uid, "promoter_market_form", state)
+        rows = [
+            [(("✅ " if p in selected else "") + name, "promoter_market_platform_" + p) for p,name in [("telegram","Telegram"),("tiktok","TikTok")]],
+            [(("✅ " if p in selected else "") + name, "promoter_market_platform_" + p) for p,name in [("youtube","YouTube"),("instagram","Instagram")]],
+            [(("✅ " if p in selected else "") + name, "promoter_market_platform_" + p) for p,name in [("facebook","Facebook"),("other","Other")]],
+            [("✅ Continue","promoter_market_platform_continue")],
+            [("❌ Cancel","ads")]
+        ]
+        await q.edit_message_text(
+            str(setting_value("promoter_question_platforms", "Which social media platforms do you have? Select at least one.")) +
+            "\n\nSelected: " + (", ".join(platform_names[p] for p in selected) if selected else "None yet") +
+            "\nChoose one or more, then tap Continue.",
+            reply_markup=kb(rows)
+        )
+    elif action.startswith("promoter_market_price_"):
+        if not setting_enabled("promoter_ads_active"):
+            await q.edit_message_text("📣 Promoter submissions are temporarily unavailable.", reply_markup=kb([[("⬅️ Promotion Center","ads")]])); return
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+        if not pending or pending["action"] != "promoter_market_form":
+            await q.edit_message_text("Your promoter form expired. Please start again.", reply_markup=kb([[("📢 Start promoter form","promoter_market_start")]])); return
+        state = decode_pending(pending["data"])
+        period = action.removeprefix("promoter_market_price_")
+        if period == "done":
+            if not state.get("prices"):
+                await q.answer("Set a price for at least one period first.", show_alert=True); return
+            with db() as c:
+                cur = c.execute(
+                    "INSERT INTO promoter_ad_submissions(user_id,platforms,content_type,followers,channel_link,price_day,price_week,price_month,status,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?, 'pending',?,?)",
+                    (uid, ", ".join(state["platforms"]), state["content_type"], int(state["followers"]), state["channel_link"],
+                     state["prices"].get("day"), state["prices"].get("week"), state["prices"].get("month"), now(), now())
+                )
+                submission_id = cur.lastrowid
+                c.execute("DELETE FROM pending_inputs WHERE user_id=?", (uid,))
+            await q.edit_message_text(f"✅ Promoter submission #{submission_id} sent to admins for review. You can return to the Promotion Center anytime.", reply_markup=kb([[("📣 Promotion Center","ads")],[("🏠 Dashboard","home")]]))
+            await notify_admins(context, f"📣 NEW PROMOTER SUBMISSION #{submission_id}\nUser: {uid}\nPlatforms: {', '.join(state['platforms'])}\nContent: {state['content_type']}\nFollowers: {state['followers']}\nLink: {state['channel_link']}\nPrices: day={state['prices'].get('day','—')} ETB, week={state['prices'].get('week','—')} ETB, month={state['prices'].get('month','—')} ETB\nReview in Admin Dashboard → Promoter submissions.")
+            return
+        if period not in {"day","week","month"}:
+            await q.edit_message_text("Unknown price period."); return
+        if period in state.get("prices", {}):
+            await q.answer("You already set this period's price. Choose another period or submit.", show_alert=True); return
+        state["price_period"] = period
+        state["step"] = "price_amount"
+        set_pending(uid, "promoter_market_form", state)
+        await q.edit_message_text(f"Enter your advertising price in ETB per {period}. Use a number greater than 0.", reply_markup=kb([[("❌ Cancel","ads")]]))
+    elif action == "promoter_market_add_price":
+        with db() as c:
+            pending = c.execute("SELECT action,data FROM pending_inputs WHERE user_id=?", (uid,)).fetchone()
+        if not pending or pending["action"] != "promoter_market_form":
+            await q.edit_message_text("Your promoter form expired.", reply_markup=kb([[("📢 Start promoter form","promoter_market_start")]])); return
+        state = decode_pending(pending["data"])
+        state["step"] = "choose_price"
+        set_pending(uid, "promoter_market_form", state)
+        prices = state.get("prices", {})
+        rows = []
+        for p,label in [("day","Per day"),("week","Per week"),("month","Per month")]:
+            if p not in prices: rows.append([(label, "promoter_market_price_"+p)])
+        rows += [[("✅ Submit for admin review","promoter_market_price_done")],[("❌ Cancel","ads")]]
+        await q.edit_message_text("Set prices for any period you want. At least one price is required. You may set one, two, or all three.", reply_markup=kb(rows))
     elif action == "promoter_start":
         with db() as c:
             existing_profile = c.execute("SELECT user_id FROM promoter_profiles WHERE user_id=?", (uid,)).fetchone()
@@ -2761,16 +2873,31 @@ async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channel = setting_value("promoter_channel", "Not set")
         target = setting_value("promoter_target", "100")
         points = setting_value("promoter_points_per_join", "1")
+        ads_active = setting_enabled("promoter_ads_active")
+        question_keys = [
+            ("platforms","Platform selection question"),
+            ("content","Content-type question"),
+            ("followers","Follower-count question"),
+            ("link","Channel-link question"),
+            ("prices","Pricing question"),
+        ]
+        rows = [
+            [("📥 Review promoter submissions","promoter_ads_review")],
+            [("📝 Edit promoter form","promoter_ads_form_settings")],
+            [("🔴 Turn submissions off" if ads_active else "🟢 Turn submissions on","promoter_ads_toggle")],
+            [("✏️ Edit legacy referral rules","admin_promoter_set_rules")],
+            [("📡 Set referral channel","admin_promoter_set_channel")],
+            [("🎯 Set referral target","admin_promoter_set_target")],
+            [("⭐ Set referral points","admin_promoter_set_points")],
+            [("👥 View promoter users","admin_promoter_users")],
+            [("⬅️ Admin Dashboard","admin")]
+        ]
         await q.edit_message_text(
-            f"📣 PROMOTER PROGRAM SETTINGS\n\nChannel: {channel or 'Not set'}\nTarget per promoter: {target} verified joins\nPoints per join: {points}\nRules preview: {rules[:250]}",
-            reply_markup=kb([
-                [("✏️ Edit rules","admin_promoter_set_rules")],
-                [("📡 Set referral channel","admin_promoter_set_channel")],
-                [("🎯 Set target audience","admin_promoter_set_target")],
-                [("⭐ Set points per join","admin_promoter_set_points")],
-                [("👥 View promoter users","admin_promoter_users")],
-                [("⬅️ Admin Dashboard","admin")]
-            ])
+            f"📣 PROMOTER CENTER SETTINGS\n\nPromoter ad submissions: {'🟢 AVAILABLE' if ads_active else '🔴 UNAVAILABLE'}\n"
+            f"Legacy referral channel: {channel or 'Not set'}\nLegacy target: {target} verified joins\nLegacy points per join: {points}\n\n"
+            "Use Review promoter submissions to approve/save or delete submitted channel profiles. "
+            "Use Edit promoter form to change the questions users see.",
+            reply_markup=kb(rows)
         )
     elif action.startswith("admin_promoter_set_"):
         if not is_admin(uid):
